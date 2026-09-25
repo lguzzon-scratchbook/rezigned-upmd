@@ -39,11 +39,15 @@ pub struct PickerState {
     pub matches: Vec<usize>,
     pub query: String,
     pub selected: usize,
+    /// Lower-cased `files[i].display`, rebuilt only when the file list changes.
+    /// `build_matches` filters against this so keystrokes do no allocation.
+    lowered: Vec<String>,
 }
 
 impl PickerState {
     pub fn new(files: Vec<crate::markdown_files::MarkdownFile>) -> Self {
         let mut state = Self {
+            lowered: files.iter().map(|f| f.display.to_lowercase()).collect(),
             files,
             matches: Vec::new(),
             query: String::new(),
@@ -62,13 +66,27 @@ impl PickerState {
     /// Returns indices into `files` whose display path contains `query`
     /// (case-insensitive).  An empty query matches everything.
     pub fn build_matches(&self) -> Vec<usize> {
+        if self.query.is_empty() {
+            return (0..self.files.len()).collect();
+        }
+        // ponytail: single lowercase per keystroke; per-file lowercase cached.
+        // Upgrade when measured: incremental prefix filtering.
         let query = self.query.to_lowercase();
-        self.files
+        if self.lowered.len() != self.files.len() {
+            // `files` is pub and may have been mutated directly; fall back
+            // to uncached filtering rather than returning wrong results.
+            return self
+                .files
+                .iter()
+                .enumerate()
+                .filter(|(_, file)| file.display.to_lowercase().contains(&query))
+                .map(|(idx, _)| idx)
+                .collect();
+        }
+        self.lowered
             .iter()
             .enumerate()
-            .filter(|(_, file)| {
-                self.query.is_empty() || file.display.to_lowercase().contains(&query)
-            })
+            .filter(|(_, lower)| lower.contains(&query))
             .map(|(idx, _)| idx)
             .collect()
     }

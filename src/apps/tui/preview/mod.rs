@@ -265,9 +265,14 @@ impl Preview {
         self.logical_lines = rendered.lines;
         self.code_prefix_overhead = rendered.code_prefix_overhead;
 
-        // Reuse lazy render caches from unchanged lines.
+        // Reuse lazy render caches from unchanged lines via text-keyed lookup.
         self.retain_markup_caches(&mut old_lines);
-        let mut old_raw_iter = old_lines.iter_mut().filter_map(LogicalLine::lazy_text_mut);
+        let mut old_by_text: HashMap<String, Vec<usize>> = HashMap::with_capacity(old_lines.len());
+        for (idx, line) in old_lines.iter_mut().enumerate() {
+            if let Some(old) = line.lazy_text_mut() {
+                old_by_text.entry(old.text.clone()).or_default().push(idx);
+            }
+        }
 
         for line in &mut self.logical_lines {
             if let LogicalLineSource::Markup(text) = &mut line.source {
@@ -282,7 +287,19 @@ impl Preview {
             let Some(text) = line.lazy_text_mut() else {
                 continue;
             };
-            if let Some(old) = old_raw_iter.find(|old| text.same_content(old)) {
+            let pos = old_by_text.get(text.text.as_str()).and_then(|bucket| {
+                bucket.iter().position(|&i| {
+                    old_lines[i]
+                        .lazy_text_mut()
+                        .is_some_and(|old| text.same_content(old))
+                })
+            });
+            if let Some(pos) = pos {
+                let bucket = old_by_text.get_mut(text.text.as_str()).expect("key exists");
+                let idx = bucket.remove(pos);
+                let old = old_lines[idx]
+                    .lazy_text_mut()
+                    .expect("indexed line has lazy text");
                 std::mem::swap(&mut text.cached, &mut old.cached);
             }
         }
@@ -456,7 +473,11 @@ impl Preview {
                 cache.push(count);
             }
         }
-        cache.get(logical_idx).copied().unwrap_or(0).saturating_sub(1)
+        cache
+            .get(logical_idx)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(1)
     }
 
     pub fn selected_logical_line(&self) -> Option<usize> {
@@ -637,6 +658,9 @@ impl Preview {
         if term.is_empty() {
             return vec![];
         }
+        // Content rebuilds skip cache work while inactive; rebuild lazily on
+        // first active query after content change.
+        self.search.ensure_texts(&self.logical_lines);
         self.search.matches(&self.layout_lines.borrow())
     }
 
@@ -1183,7 +1207,9 @@ impl Output for Preview {
                     image_rows.push((logical_idx, first_global));
                 }
                 match search_term {
-                    Some(term) => highlight_line_lowered(logical_line.render(&ctx), term, search_style),
+                    Some(term) => {
+                        highlight_line_lowered(logical_line.render(&ctx), term, search_style)
+                    }
                     None => logical_line.render(&ctx),
                 }
             });

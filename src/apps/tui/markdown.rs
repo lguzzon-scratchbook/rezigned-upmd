@@ -1430,11 +1430,6 @@ impl<'a> MarkdownRenderer<'a> {
     }
 }
 
-/// Highlights all occurrences of `term` in a single `Line`.
-pub fn highlight_line(line: Line<'static>, term: &str, highlight_style: Style) -> Line<'static> {
-    highlight_line_lowered(line, &term.to_lowercase(), highlight_style)
-}
-
 /// Highlights with a pre-lowercased term. Hoists `term.to_lowercase()` out of
 /// per-line loops; callers rendering many lines per frame prefer this.
 pub fn highlight_line_lowered(
@@ -1504,13 +1499,6 @@ pub fn highlight_line_lowered(
     Line::from(new_spans)
         .style(line.style)
         .alignment(line.alignment.unwrap_or_default())
-}
-
-fn highlight_ranges(text: &str, term: &str) -> Vec<std::ops::Range<usize>> {
-    if term.is_empty() {
-        return vec![];
-    }
-    highlight_ranges_folded(text, &term.to_lowercase())
 }
 
 fn highlight_ranges_folded(text: &str, folded_term: &str) -> Vec<std::ops::Range<usize>> {
@@ -1884,7 +1872,8 @@ mod tests {
     #[test]
     fn test_highlight_line_thai_match_middle() {
         let style = Style::default().fg(Color::Red);
-        let line = highlight_line(Line::from("เปิดภาษาไทยได้"), "ภาษาไทย", style);
+        let line =
+            highlight_line_lowered(Line::from("เปิดภาษาไทยได้"), &"ภาษาไทย".to_lowercase(), style);
 
         assert_eq!(line.to_string(), "เปิดภาษาไทยได้");
         assert_eq!(line.spans[1].content, "ภาษาไทย");
@@ -1894,7 +1883,8 @@ mod tests {
     #[test]
     fn test_highlight_line_thai_match_at_start() {
         let style = Style::default().fg(Color::Red);
-        let line = highlight_line(Line::from("สวัสดีจาก upmd"), "สวัสดี", style);
+        let line =
+            highlight_line_lowered(Line::from("สวัสดีจาก upmd"), &"สวัสดี".to_lowercase(), style);
 
         assert_eq!(line.to_string(), "สวัสดีจาก upmd");
         assert_eq!(line.spans[0].content, "สวัสดี");
