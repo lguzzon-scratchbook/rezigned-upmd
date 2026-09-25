@@ -6,6 +6,7 @@ use crate::Kind;
 
 pub use crate::quoting::{cmd_quote, posix_quote, powershell_quote};
 
+pub mod bun;
 pub mod c;
 pub mod cmd;
 pub mod go;
@@ -32,6 +33,16 @@ crate::languages!(
         supports_inline: true,
         supports_file: true,
         package_manager: Some("npm")
+    },
+    Bun {
+        aliases: &["bun", "bunjs"],
+        kind: Kind::Interpreted,
+        syntax: "javascript".to_string(),
+        binaries: &["bun"],
+        file_extension: "js",
+        supports_inline: true,
+        supports_file: true,
+        package_manager: Some("bun")
     },
     TypeScript {
         aliases: &["ts", "typescript"],

@@ -146,7 +146,7 @@ Python, Go, Rust, and TypeScript can opt into experimental state capture with `-
 
 ## Supported languages
 
-Built-in runners cover Bash, POSIX shell, Zsh, Fish, Cmd, PowerShell, Python, JavaScript, TypeScript, Ruby, PHP, C, Go, Rust, and Zig.
+Built-in runners cover Bash, POSIX shell, Zsh, Fish, Cmd, PowerShell, Python, JavaScript, TypeScript, Bun, Ruby, PHP, C, Go, Rust, and Zig.
 
 TypeScript tries Node.js native strip-types, `npx tsx`, then `ts-node`. Rust uses `rustc` or `cargo rustc --`. Override a binary with `[bin:...]` on a task or `binaries.<language>` in the configuration. Compiled runners use isolated temporary workspaces.
 

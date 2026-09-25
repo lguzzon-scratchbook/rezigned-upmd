@@ -121,7 +121,7 @@ console.log(`JavaScript received: ${msg}`);
 console.log('Node version:', process.version);
 ```
 
-upmd also supports TypeScript, Ruby, PHP, C, Go, Rust, Zig, Fish, Zsh, Cmd, and PowerShell when their executables are installed.
+upmd also supports TypeScript, Bun, Ruby, PHP, C, Go, Rust, Zig, Fish, Zsh, Cmd, and PowerShell when their executables are installed.
 
 ## Named blocks and goto
 

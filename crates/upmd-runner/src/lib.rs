@@ -488,7 +488,7 @@ macro_rules! languages {
 // Language definitions and the lookup registry live in languages/mod.rs.
 // Re-export the lookup functions and all language structs.
 pub use languages::{
-    create_runner, find, find_by_language, find_or_default, Bash, Cmd, Fish, Go, JavaScript,
+    create_runner, find, find_by_language, find_or_default, Bash, Bun, Cmd, Fish, Go, JavaScript,
     PowerShell, Python, Ruby, Rust, Shell, TypeScript, Zig, Zsh, C, PHP,
 };
 
