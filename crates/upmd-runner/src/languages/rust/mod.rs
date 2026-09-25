@@ -108,12 +108,12 @@ impl LanguageRunner for Rust {
         }
 
         // 2. rustc (direct compile)
-        if which::which("rustc").is_ok() {
+        if crate::cached_which("rustc").is_some() {
             return Ok(("rustc".to_string(), Vec::new()));
         }
 
         // 3. cargo (wraps rustc)
-        if which::which("cargo").is_ok() {
+        if crate::cached_which("cargo").is_some() {
             return Ok((
                 "cargo".to_string(),
                 vec!["rustc".to_string(), "--".to_string()],

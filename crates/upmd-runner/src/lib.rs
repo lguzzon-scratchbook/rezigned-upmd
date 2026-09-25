@@ -23,10 +23,33 @@
 //! let plan = runner.plan(&input).unwrap();
 //! ```
 
-use std::{borrow::Cow, collections::HashMap, path::PathBuf};
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    path::PathBuf,
+    sync::{LazyLock, Mutex},
+};
+
+static WHICH_CACHE: LazyLock<Mutex<HashMap<String, Option<PathBuf>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Cached `which` lookup. PATH rarely changes mid-process; PATH-mutating
+/// tests must run in separate processes.
+/// ponytail: no cache invalidation, add when PATH hot-swap needed.
+pub fn cached_which(name: &str) -> Option<PathBuf> {
+    if let Ok(cache) = WHICH_CACHE.lock() {
+        if let Some(hit) = cache.get(name) {
+            return hit.clone();
+        }
+    }
+    let res = which::which(name).ok();
+    if let Ok(mut cache) = WHICH_CACHE.lock() {
+        cache.insert(name.to_string(), res.clone());
+    }
+    res
+}
 
 pub mod languages;
 pub mod quoting;
@@ -323,7 +346,7 @@ pub trait LanguageRunner {
             return Ok((bin.clone(), Vec::new()));
         }
         for candidate in self.language().binaries {
-            if which::which(candidate).is_ok() {
+            if cached_which(candidate).is_some() {
                 return Ok((candidate.to_string(), Vec::new()));
             }
         }

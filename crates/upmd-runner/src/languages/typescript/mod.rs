@@ -11,11 +11,35 @@
 //! If none are found the plan step returns a clear error with installation
 //! instructions.
 
+use std::sync::LazyLock;
+
 use anyhow::Result;
 
 use super::TypeScript;
 use crate::{CodeId, CodeInput, ExecutionPlan, FifoPaths, LanguageRunner};
 
+static NODE_VERSION: LazyLock<Option<(u32, u32)>> = LazyLock::new(|| {
+    let node_path = crate::cached_which("node")?;
+    let output = std::process::Command::new(&node_path)
+        .arg("--version")
+        .output()
+        .ok()?;
+    let v = String::from_utf8_lossy(&output.stdout);
+    let mut parts = v
+        .trim()
+        .strip_prefix('v')
+        .unwrap_or(v.trim())
+        .split('.')
+        .filter_map(|s| s.parse::<u32>().ok());
+    Some((parts.next()?, parts.next().unwrap_or(0)))
+});
+
+fn node_strip_types_supported() -> bool {
+    match *NODE_VERSION {
+        Some((m, p)) => m > 22 || (m == 22 && p >= 6),
+        None => false,
+    }
+}
 impl LanguageRunner for TypeScript {
     fn supports_state_capture(&self) -> bool {
         true
@@ -96,37 +120,22 @@ impl LanguageRunner for TypeScript {
         }
 
         // 2. Node.js native strip-types (22.6+)
-        if let Ok(node_path) = which::which("node") {
-            if let Ok(output) = std::process::Command::new(&node_path)
-                .arg("--version")
-                .output()
-            {
-                let v = String::from_utf8_lossy(&output.stdout);
-                let parts: Vec<u32> = v
-                    .trim()
-                    .strip_prefix('v')
-                    .unwrap_or(&v)
-                    .split('.')
-                    .filter_map(|s| s.parse().ok())
-                    .collect();
-                let supported = parts.first().is_some_and(|&m| m > 22)
-                    || (parts.first() == Some(&22) && parts.get(1).is_some_and(|&p| p >= 6));
-                if supported {
-                    return Ok((
-                        node_path.to_string_lossy().to_string(),
-                        vec!["--experimental-strip-types".to_string()],
-                    ));
-                }
+        if node_strip_types_supported() {
+            if let Some(node_path) = crate::cached_which("node") {
+                return Ok((
+                    node_path.to_string_lossy().to_string(),
+                    vec!["--experimental-strip-types".to_string()],
+                ));
             }
         }
 
         // 3. npx tsx (finds project-local tsx. May prompt to install.)
-        if which::which("npx").is_ok() {
+        if crate::cached_which("npx").is_some() {
             return Ok(("npx".to_string(), vec!["tsx".to_string()]));
         }
 
         // 4. ts-node direct (legacy, avoids npx install prompt)
-        if which::which("ts-node").is_ok() {
+        if crate::cached_which("ts-node").is_some() {
             return Ok((
                 "ts-node".to_string(),
                 vec![
