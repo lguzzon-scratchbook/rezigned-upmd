@@ -51,6 +51,19 @@ python3 scripts/bench_compare.py --current target/bench --baseline target/bench-
 3. Runs `scripts/bench_compare.py` if `target/bench-baseline/` exists;
    missing baseline = warn + pass (first run has nothing to compare).
 
+Variance note: fixed-iteration p50/p95 on shared runners carries ~±10%
+natural variance. The 5% gate applies to like-for-like same-machine
+comparisons (local baseline vs local current). CI acts as trend warning,
+not hard merge blocker.
+
+## Measured deltas (bbd48b1 → this branch, same machine)
+
+- `parse_large` p50: 7105358 → 5712970 ns (-19.6%)
+- `parse_small` p50: 2884 → 2834 ns (-1.7%)
+- `plan_python/js/go/rust` p50: -98% to -99% (binary-resolution caching;
+  pre-refactor runs spawned `which`/version probes per `plan()`)
+- `plan_bash/sh` p50: -8% to -16%
+
 ## Read results
 
 JSON shape:
