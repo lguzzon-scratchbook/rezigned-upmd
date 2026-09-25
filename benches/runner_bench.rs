@@ -1,4 +1,6 @@
 //! Runner `plan()` latency per language, stdlib only.
+//! Batch 100 plan() calls per sample so each sample (~10us)
+//! dwarfs timer overhead (~20-40ns); report per-plan ns.
 //!
 //! Run: `cargo bench --bench runner_bench`
 //! Output: `target/bench/runner.json`
@@ -41,33 +43,38 @@ fn main() {
         };
         let language = runner.language().clone();
         let iters = 2000usize;
+        let batch = 100usize;
         for _ in 0..10 {
-            let input = CodeInput {
-                id: 1,
-                content,
-                language: &language,
-                state_capture: &no_capture,
-            };
-            let _ = std::hint::black_box(runner.plan(&input));
+            for _ in 0..batch {
+                let input = CodeInput {
+                    id: 1,
+                    content,
+                    language: &language,
+                    state_capture: &no_capture,
+                };
+                let _ = std::hint::black_box(runner.plan(&input));
+            }
         }
         let mut samples = Vec::with_capacity(iters);
         for _ in 0..iters {
-            let input = CodeInput {
-                id: 1,
-                content,
-                language: &language,
-                state_capture: &no_capture,
-            };
             let start = Instant::now();
-            let plan = runner.plan(&input).expect("plan succeeds");
-            std::hint::black_box(plan);
-            samples.push(start.elapsed().as_nanos());
+            for _ in 0..batch {
+                let input = CodeInput {
+                    id: 1,
+                    content,
+                    language: &language,
+                    state_capture: &no_capture,
+                };
+                let plan = runner.plan(&input).expect("plan succeeds");
+                std::hint::black_box(plan);
+            }
+            samples.push(start.elapsed().as_nanos() / batch as u128);
         }
         let mean_ns = samples.iter().sum::<u128>() / samples.len() as u128;
         let p50 = percentile(&mut samples.clone(), 50.0);
         let p95 = percentile(&mut samples, 95.0);
         rows.push(format!(
-            "    {{\"name\": \"plan_{lang}\", \"iters\": {iters}, \"mean_ns\": {mean_ns}, \"p50_ns\": {p50}, \"p95_ns\": {p95}}}"
+            "    {{\"name\": \"plan_{lang}\", \"iters\": {iters}, \"batch\": {batch}, \"mean_ns\": {mean_ns}, \"p50_ns\": {p50}, \"p95_ns\": {p95}}}"
         ));
     }
     let json = format!(

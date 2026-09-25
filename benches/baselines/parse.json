@@ -1,7 +1,7 @@
 {
   "bench": "parse",
   "results": [
-    {"name": "parse_small", "iters": 500, "bytes": 99, "mean_ns": 3830, "p50_ns": 2834, "p95_ns": 5198, "throughput_bps": 25848563},
-    {"name": "parse_large", "iters": 20, "bytes": 336265, "mean_ns": 5855077, "p50_ns": 5712970, "p95_ns": 8366656, "throughput_bps": 57431354}
+    {"name": "parse_small", "iters": 500, "bytes": 99, "mean_ns": 3279, "p50_ns": 3005, "p95_ns": 3115, "throughput_bps": 30192131},
+    {"name": "parse_large", "iters": 50, "bytes": 336265, "mean_ns": 7357663, "p50_ns": 7471790, "p95_ns": 8115561, "throughput_bps": 45702691}
   ]
 }

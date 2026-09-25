@@ -1,11 +1,11 @@
 {
   "bench": "runner",
   "results": [
-    {"name": "plan_bash", "iters": 2000, "mean_ns": 109, "p50_ns": 101, "p95_ns": 170},
-    {"name": "plan_sh", "iters": 2000, "mean_ns": 177, "p50_ns": 120, "p95_ns": 160},
-    {"name": "plan_python", "iters": 2000, "mean_ns": 156, "p50_ns": 150, "p95_ns": 190},
-    {"name": "plan_js", "iters": 2000, "mean_ns": 212, "p50_ns": 200, "p95_ns": 250},
-    {"name": "plan_go", "iters": 2000, "mean_ns": 776, "p50_ns": 812, "p95_ns": 1071},
-    {"name": "plan_rust", "iters": 2000, "mean_ns": 505, "p50_ns": 521, "p95_ns": 691}
+    {"name": "plan_bash", "iters": 2000, "batch": 100, "mean_ns": 83, "p50_ns": 81, "p95_ns": 103},
+    {"name": "plan_sh", "iters": 2000, "batch": 100, "mean_ns": 82, "p50_ns": 88, "p95_ns": 101},
+    {"name": "plan_python", "iters": 2000, "batch": 100, "mean_ns": 140, "p50_ns": 136, "p95_ns": 156},
+    {"name": "plan_js", "iters": 2000, "batch": 100, "mean_ns": 156, "p50_ns": 168, "p95_ns": 190},
+    {"name": "plan_go", "iters": 2000, "batch": 100, "mean_ns": 984, "p50_ns": 894, "p95_ns": 1112},
+    {"name": "plan_rust", "iters": 2000, "batch": 100, "mean_ns": 605, "p50_ns": 541, "p95_ns": 1124}
   ]
 }

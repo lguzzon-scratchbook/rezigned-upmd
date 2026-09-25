@@ -86,11 +86,10 @@ fn bench_case(name: &str, source: &str, iters: usize) -> String {
 fn main() {
     let small = small_md();
     let large = large_md();
-    // Fewer iters for large input: keeps `cargo bench` under ~30s on CI.
-    // ponytail: fixed iters; add when need adaptive time-budget loop.
+    // parse_large at 50 iters keeps `cargo bench` fast (~1s) with stable p95.
     let rows = [
         bench_case("parse_small", &small, 500),
-        bench_case("parse_large", &large, 20),
+        bench_case("parse_large", &large, 50),
     ];
     let json = format!(
         "{{\n  \"bench\": \"parse\",\n  \"results\": [\n{}\n  ]\n}}\n",

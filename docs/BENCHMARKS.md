@@ -58,6 +58,10 @@ not hard merge blocker. Recalibrate `benches/baselines/` from CI-produced
 numbers once available: download the `bench-results` artifact from a main
 run and copy into `benches/baselines/`.
 
+Noise floor: sub-microsecond `plan_*` KPIs are timer-resolution-bound, so treat
+single-run ±5% moves on sub-us benches as trend-only. `parse_large` p95 needs
+50 iters minimum for a stable tail reading.
+
 Refresh procedure: `cargo bench --bench parse_bench --bench runner_bench`
 then `cp target/bench/*.json benches/baselines/`.
 
