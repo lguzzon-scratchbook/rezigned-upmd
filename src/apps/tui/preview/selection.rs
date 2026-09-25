@@ -55,6 +55,14 @@ impl PreviewSelection {
         self.state.range_for_line(line_idx, line_len)
     }
 
+    pub fn range_for_line_opt(
+        &self,
+        line_idx: usize,
+        line_len: impl FnOnce() -> usize,
+    ) -> Option<(usize, usize)> {
+        self.state.range_for_line_opt(line_idx, line_len)
+    }
+
     pub fn set_pending_code_click(&self, id: Option<CodeId>) {
         self.pending_code_click.set(id);
     }

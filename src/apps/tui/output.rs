@@ -175,7 +175,7 @@ impl Output {
             let sel_style = theme.selection_style();
             for (row, line) in text.lines.iter_mut().enumerate() {
                 let global_line = row + scroll;
-                let line_len = line.to_string().chars().count();
+                let line_len = crate::apps::tui::wrap::line_char_count(line);
                 if let Some((sel_start, sel_end)) =
                     self.selection.range_for_line(global_line, line_len)
                 {

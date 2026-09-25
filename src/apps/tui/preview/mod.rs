@@ -42,7 +42,7 @@ use super::markdown::{
     MarkdownRenderer, RenderMode, SourcePosition,
 };
 use super::selection::SelectionState;
-use super::wrap::CopyLine;
+use super::wrap::{line_char_count, CopyLine};
 use crate::apps::task::Task;
 use crate::apps::tui::widgets::Spinner;
 
@@ -115,6 +115,8 @@ pub struct Preview {
     image_base_dir: std::path::PathBuf,
     /// Current render mode (visual vs source-preserving markup).
     mode: Cell<RenderMode>,
+    /// Prefix sums of heading counts per logical line; rebuilt on length change.
+    heading_prefix: RefCell<Vec<usize>>,
 }
 
 #[derive(KeyMap, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -186,6 +188,7 @@ impl Preview {
             images: RefCell::new(ImageCache::new()),
             image_base_dir,
             mode: Cell::new(RenderMode::Visual),
+            heading_prefix: RefCell::new(Vec::new()),
         };
         preview.rebuild_view(outputs);
         if !preview.layout_lines.is_empty() {
@@ -441,11 +444,19 @@ impl Preview {
 
     /// Counts the number of heading lines at or before the given logical line index.
     pub fn heading_count_at_line(&self, logical_idx: usize) -> usize {
-        self.logical_lines[..=logical_idx]
-            .iter()
-            .filter(|line| line.heading_level().is_some())
-            .count()
-            .saturating_sub(1)
+        let mut cache = self.heading_prefix.borrow_mut();
+        if cache.len() != self.logical_lines.len() {
+            cache.clear();
+            cache.reserve(self.logical_lines.len());
+            let mut count = 0;
+            for line in &self.logical_lines {
+                if line.heading_level().is_some() {
+                    count += 1;
+                }
+                cache.push(count);
+            }
+        }
+        cache.get(logical_idx).copied().unwrap_or(0).saturating_sub(1)
     }
 
     pub fn selected_logical_line(&self) -> Option<usize> {
@@ -465,7 +476,7 @@ impl Preview {
             Some(id) => {
                 let first_logical_idx = layout_lines
                     .iter()
-                    .find(|line| line.code_id(logical_lines) == Some(id))?
+                    .find(|line| line.logical(logical_lines).code_id == Some(id))?
                     .logical_idx;
                 Some(LayoutLineIdentity::Code {
                     id,
@@ -503,7 +514,7 @@ impl Preview {
         let layout_lines = self.layout_lines.borrow();
         let first_logical_idx = layout_lines
             .iter()
-            .find(|line| line.code_id(&self.logical_lines) == Some(id))?
+            .find(|line| line.logical(&self.logical_lines).code_id == Some(id))?
             .logical_idx;
         let logical_idx = first_logical_idx + line_idx;
 
@@ -1177,7 +1188,7 @@ impl Output for Preview {
 
             if let Some((sel_start, sel_end)) = self
                 .selection
-                .range_for_line(layout_idx, line.to_string().chars().count())
+                .range_for_line_opt(layout_idx, || line_char_count(&line))
             {
                 line = SelectionState::apply_range(
                     line,

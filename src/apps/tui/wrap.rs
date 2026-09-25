@@ -45,30 +45,49 @@ pub fn wrap_ranges(line: &Line<'_>, max_width: usize) -> Vec<Range<usize>> {
     ranges
 }
 
+/// Returns the character count of a `Line` without allocating.
+///
+/// Sums span contents directly; cheaper than `line.to_string().chars().count()`
+/// on per-frame hot paths.
+#[inline]
+pub fn line_char_count(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum()
+}
+
 /// Extracts a character range while preserving span, line, and alignment styles.
+///
+/// Single pass per span: counts length and extracts the overlap in one char walk.
 pub fn slice_line(line: &Line<'static>, range: Range<usize>) -> Line<'static> {
     let mut cursor = 0;
     let spans = line
         .spans
         .iter()
         .filter_map(|span| {
-            let span_len = span.content.chars().count();
             let span_start = cursor;
-            let span_end = cursor + span_len;
-            cursor = span_end;
-
-            let start = range.start.max(span_start);
-            let end = range.end.min(span_end);
-            if start >= end {
+            if span_start >= range.end {
+                cursor += span.content.chars().count();
                 return None;
             }
-
-            let text: String = span
-                .content
-                .chars()
-                .skip(start - span_start)
-                .take(end - start)
-                .collect();
+            let mut text = String::new();
+            let mut span_len = 0;
+            for (idx, (byte_idx, ch)) in span.content.char_indices().enumerate() {
+                let pos = span_start + idx;
+                if pos >= range.end {
+                    span_len += span.content[byte_idx..].chars().count();
+                    break;
+                }
+                if pos >= range.start {
+                    text.push(ch);
+                }
+                span_len += 1;
+            }
+            cursor = span_start + span_len;
+            if text.is_empty() {
+                return None;
+            }
             Some(Span::styled(text, span.style))
         })
         .collect::<Vec<_>>();

@@ -6,7 +6,7 @@ use crate::apps::theme::Theme;
 use crate::runner::CodeId;
 
 use crate::apps::tui::markdown::{apply_gutter, LineRenderContext, LogicalLine};
-use crate::apps::tui::wrap::{slice_line, wrap_ranges};
+use crate::apps::tui::wrap::{line_char_count, slice_line, wrap_ranges};
 
 /// Width-dependent slice of a logical line occupying one terminal row.
 #[derive(Debug, Clone)]
@@ -164,7 +164,7 @@ impl LayoutLines {
 
             let line = logical_line.render_plain(&ctx);
             if logical_line.is_unwrappable() {
-                let char_len = line.to_string().chars().count();
+                let char_len = line_char_count(&line);
                 new_layout_lines.push(LayoutLine::new(idx, 0, 0..char_len));
                 continue;
             }

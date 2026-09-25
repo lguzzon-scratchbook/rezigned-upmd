@@ -154,6 +154,14 @@ impl SelectionState {
     /// Returns the selection range `(start_char, end_char)` for a given line,
     /// or `None` if the line is outside the selection.
     pub fn range_for_line(&self, line_idx: usize, line_len: usize) -> Option<(usize, usize)> {
+        self.range_for_line_opt(line_idx, || line_len)
+    }
+
+    pub fn range_for_line_opt(
+        &self,
+        line_idx: usize,
+        line_len: impl FnOnce() -> usize,
+    ) -> Option<(usize, usize)> {
         let (start_line, start_char) = self.start.get()?;
         let (end_line, end_char) = self.end.get()?;
 
@@ -170,9 +178,9 @@ impl SelectionState {
 
         let sel_start = if line_idx == lo_line { lo_char } else { 0 };
         let sel_end = if line_idx == hi_line {
-            hi_char.min(line_len)
+            hi_char.min(line_len())
         } else {
-            line_len
+            line_len()
         };
         Some((sel_start, sel_end))
     }
@@ -220,8 +228,7 @@ impl SelectionState {
         let mut char_pos = 0;
 
         for span in line.spans {
-            let span_text = span.content.to_string();
-            let span_len = span_text.chars().count();
+            let span_len = span.content.chars().count();
             let span_end = char_pos + span_len;
 
             if span_end <= sel_start || char_pos >= sel_end {
@@ -230,23 +237,28 @@ impl SelectionState {
                 let sel_start_in_span = sel_start.saturating_sub(char_pos);
                 let sel_end_in_span = (sel_end - char_pos).min(span_len);
 
+                let chars: Vec<char> = span.content.chars().collect();
                 if sel_start_in_span > 0 {
-                    let before: String = span_text.chars().take(sel_start_in_span).collect();
-                    new_spans.push(Span::styled(before, span.style));
+                    new_spans.push(Span::styled(
+                        chars[..sel_start_in_span].iter().collect::<String>(),
+                        span.style,
+                    ));
                 }
 
-                let selected: String = span_text
-                    .chars()
-                    .skip(sel_start_in_span)
-                    .take(sel_end_in_span.saturating_sub(sel_start_in_span))
-                    .collect();
-                if !selected.is_empty() {
-                    new_spans.push(Span::styled(selected, span.style.patch(sel_style)));
+                if sel_end_in_span > sel_start_in_span {
+                    new_spans.push(Span::styled(
+                        chars[sel_start_in_span..sel_end_in_span]
+                            .iter()
+                            .collect::<String>(),
+                        span.style.patch(sel_style),
+                    ));
                 }
 
                 if sel_end_in_span < span_len {
-                    let after: String = span_text.chars().skip(sel_end_in_span).collect();
-                    new_spans.push(Span::styled(after, span.style));
+                    new_spans.push(Span::styled(
+                        chars[sel_end_in_span..].iter().collect::<String>(),
+                        span.style,
+                    ));
                 }
             }
 

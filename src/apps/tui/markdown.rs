@@ -1432,7 +1432,14 @@ impl<'a> MarkdownRenderer<'a> {
 
 /// Highlights all occurrences of `term` in a single `Line`.
 pub fn highlight_line(line: Line<'static>, term: &str, highlight_style: Style) -> Line<'static> {
-    let ranges = highlight_ranges(&line.to_string(), term);
+    if term.is_empty() {
+        return line;
+    }
+    let mut text = String::new();
+    for span in &line.spans {
+        text.push_str(span.content.as_ref());
+    }
+    let ranges = highlight_ranges(&text, term);
 
     if ranges.is_empty() {
         return line;
@@ -1440,45 +1447,48 @@ pub fn highlight_line(line: Line<'static>, term: &str, highlight_style: Style) -
 
     let mut new_spans = Vec::new();
     let mut offset = 0;
+    let mut range_idx = 0;
 
     for span in &line.spans {
-        let span_len = span.content.chars().count();
+        let chars: Vec<char> = span.content.chars().collect();
+        let span_len = chars.len();
         let span_start = offset;
+        let span_end = span_start + span_len;
+        while range_idx < ranges.len() && ranges[range_idx].end <= span_start {
+            range_idx += 1;
+        }
         let mut cursor = 0;
-
-        for r in &ranges {
-            let rel_start = r.start.saturating_sub(span_start).min(span_len);
-            let rel_end = r.end.saturating_sub(span_start).min(span_len);
-            if rel_start >= rel_end || rel_end <= cursor {
+        let mut i = range_idx;
+        while i < ranges.len() && ranges[i].start < span_end {
+            let rel_start = ranges[i].start.saturating_sub(span_start).min(span_len);
+            let rel_end = (ranges[i].end.saturating_sub(span_start)).min(span_len);
+            if rel_end <= cursor {
+                i += 1;
                 continue;
             }
-            if rel_start > cursor {
+            let from = rel_start.max(cursor);
+            if from > cursor {
                 new_spans.push(Span::styled(
-                    span.content
-                        .chars()
-                        .skip(cursor)
-                        .take(rel_start - cursor)
-                        .collect::<String>(),
+                    chars[cursor..from].iter().collect::<String>(),
                     span.style,
                 ));
             }
-            new_spans.push(Span::styled(
-                span.content
-                    .chars()
-                    .skip(rel_start)
-                    .take(rel_end - rel_start)
-                    .collect::<String>(),
-                highlight_style,
-            ));
-            cursor = rel_end;
+            if rel_end > from {
+                new_spans.push(Span::styled(
+                    chars[from..rel_end].iter().collect::<String>(),
+                    highlight_style,
+                ));
+                cursor = rel_end;
+            }
+            i += 1;
         }
         if cursor < span_len {
             new_spans.push(Span::styled(
-                span.content.chars().skip(cursor).collect::<String>(),
+                chars[cursor..].iter().collect::<String>(),
                 span.style,
             ));
         }
-        offset += span_len;
+        offset = span_end;
     }
 
     Line::from(new_spans)
@@ -1501,10 +1511,15 @@ fn highlight_ranges(text: &str, term: &str) -> Vec<std::ops::Range<usize>> {
     }
 
     let folded_term = term.to_lowercase();
+    let mut byte_to_char = vec![0usize; folded.len() + 1];
+    for (char_idx, (byte_idx, _)) in folded.char_indices().enumerate() {
+        byte_to_char[byte_idx] = char_idx;
+    }
+    byte_to_char[folded.len()] = folded_to_original.len();
     folded
         .match_indices(folded_term.as_str())
         .filter_map(|(byte_start, matched)| {
-            let char_start = folded[..byte_start].chars().count();
+            let char_start = *byte_to_char.get(byte_start)?;
             let char_end = char_start + matched.chars().count();
             let original_start = *folded_to_original.get(char_start)?;
             let original_end = *folded_to_original.get(char_end.saturating_sub(1))? + 1;
