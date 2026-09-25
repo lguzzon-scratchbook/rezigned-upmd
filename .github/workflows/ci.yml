@@ -83,9 +83,8 @@ jobs:
           name: bench-results
           path: target/bench/*.json
       - name: Compare against baseline
+        continue-on-error: true
         run: |
-          if [ -d target/bench-baseline ]; then
-            python3 scripts/bench_compare.py --current target/bench --baseline target/bench-baseline
-          else
-            echo "No baseline dir; skipping comparison (pass). Save target/bench/*.json as baseline to enable."
-          fi
+          mkdir -p target/bench-baseline
+          cp benches/baselines/*.json target/bench-baseline/
+          python3 scripts/bench_compare.py --current target/bench --baseline target/bench-baseline

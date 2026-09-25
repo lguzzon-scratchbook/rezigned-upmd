@@ -1,0 +1,11 @@
+{
+  "bench": "runner",
+  "results": [
+    {"name": "plan_bash", "iters": 2000, "mean_ns": 109, "p50_ns": 101, "p95_ns": 170},
+    {"name": "plan_sh", "iters": 2000, "mean_ns": 177, "p50_ns": 120, "p95_ns": 160},
+    {"name": "plan_python", "iters": 2000, "mean_ns": 156, "p50_ns": 150, "p95_ns": 190},
+    {"name": "plan_js", "iters": 2000, "mean_ns": 212, "p50_ns": 200, "p95_ns": 250},
+    {"name": "plan_go", "iters": 2000, "mean_ns": 776, "p50_ns": 812, "p95_ns": 1071},
+    {"name": "plan_rust", "iters": 2000, "mean_ns": 505, "p50_ns": 521, "p95_ns": 691}
+  ]
+}

@@ -48,13 +48,18 @@ python3 scripts/bench_compare.py --current target/bench --baseline target/bench-
 
 1. Runs both benches.
 2. Uploads `target/bench/*.json` as `bench-results` artifact.
-3. Runs `scripts/bench_compare.py` if `target/bench-baseline/` exists;
-   missing baseline = warn + pass (first run has nothing to compare).
+3. Copies `benches/baselines/*.json` to `target/bench-baseline/` and runs
+   `scripts/bench_compare.py` unconditionally (`continue-on-error: true`).
 
 Variance note: fixed-iteration p50/p95 on shared runners carries ~±10%
 natural variance. The 5% gate applies to like-for-like same-machine
 comparisons (local baseline vs local current). CI acts as trend warning,
-not hard merge blocker.
+not hard merge blocker. Recalibrate `benches/baselines/` from CI-produced
+numbers once available: download the `bench-results` artifact from a main
+run and copy into `benches/baselines/`.
+
+Refresh procedure: `cargo bench --bench parse_bench --bench runner_bench`
+then `cp target/bench/*.json benches/baselines/`.
 
 ## Measured deltas (bbd48b1 → this branch, same machine)
 
