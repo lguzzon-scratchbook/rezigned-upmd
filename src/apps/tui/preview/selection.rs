@@ -51,10 +51,6 @@ impl PreviewSelection {
         self.state.is_dragging()
     }
 
-    pub fn range_for_line(&self, line_idx: usize, line_len: usize) -> Option<(usize, usize)> {
-        self.state.range_for_line(line_idx, line_len)
-    }
-
     pub fn range_for_line_opt(
         &self,
         line_idx: usize,
