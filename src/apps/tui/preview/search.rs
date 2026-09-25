@@ -63,4 +63,8 @@ impl PreviewSearch {
     pub fn term(&self) -> Option<&str> {
         self.term.as_deref()
     }
+
+    pub fn term_lower(&self) -> Option<&str> {
+        self.term_lower.as_deref()
+    }
 }

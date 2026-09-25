@@ -1432,14 +1432,24 @@ impl<'a> MarkdownRenderer<'a> {
 
 /// Highlights all occurrences of `term` in a single `Line`.
 pub fn highlight_line(line: Line<'static>, term: &str, highlight_style: Style) -> Line<'static> {
-    if term.is_empty() {
+    highlight_line_lowered(line, &term.to_lowercase(), highlight_style)
+}
+
+/// Highlights with a pre-lowercased term. Hoists `term.to_lowercase()` out of
+/// per-line loops; callers rendering many lines per frame prefer this.
+pub fn highlight_line_lowered(
+    line: Line<'static>,
+    term_lower: &str,
+    highlight_style: Style,
+) -> Line<'static> {
+    if term_lower.is_empty() {
         return line;
     }
     let mut text = String::new();
     for span in &line.spans {
         text.push_str(span.content.as_ref());
     }
-    let ranges = highlight_ranges(&text, term);
+    let ranges = highlight_ranges_folded(&text, term_lower);
 
     if ranges.is_empty() {
         return line;
@@ -1500,6 +1510,13 @@ fn highlight_ranges(text: &str, term: &str) -> Vec<std::ops::Range<usize>> {
     if term.is_empty() {
         return vec![];
     }
+    highlight_ranges_folded(text, &term.to_lowercase())
+}
+
+fn highlight_ranges_folded(text: &str, folded_term: &str) -> Vec<std::ops::Range<usize>> {
+    if folded_term.is_empty() {
+        return vec![];
+    }
 
     let mut folded = String::new();
     let mut folded_to_original = Vec::new();
@@ -1510,14 +1527,13 @@ fn highlight_ranges(text: &str, term: &str) -> Vec<std::ops::Range<usize>> {
         }
     }
 
-    let folded_term = term.to_lowercase();
     let mut byte_to_char = vec![0usize; folded.len() + 1];
     for (char_idx, (byte_idx, _)) in folded.char_indices().enumerate() {
         byte_to_char[byte_idx] = char_idx;
     }
     byte_to_char[folded.len()] = folded_to_original.len();
     folded
-        .match_indices(folded_term.as_str())
+        .match_indices(folded_term)
         .filter_map(|(byte_start, matched)| {
             let char_start = *byte_to_char.get(byte_start)?;
             let char_end = char_start + matched.chars().count();

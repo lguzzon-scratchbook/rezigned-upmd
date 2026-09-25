@@ -38,7 +38,7 @@ use upmd_parser::nodes::Node;
 use upmd_parser::{Codes, Document};
 
 use super::markdown::{
-    highlight_line, prepare_lines, LineRenderContext, LogicalLine, LogicalLineSource,
+    highlight_line_lowered, prepare_lines, LineRenderContext, LogicalLine, LogicalLineSource,
     MarkdownRenderer, RenderMode, SourcePosition,
 };
 use super::selection::SelectionState;
@@ -1165,6 +1165,9 @@ impl Output for Preview {
         self.prefetch_content(&layout_lines, original_offset, viewport, &ctx);
 
         // Wrapped rows share one rendered logical line per frame.
+        // Search highlight applies before slicing so wrapped rows reuse it.
+        let search_term = self.search.term_lower();
+        let search_style = self.theme.search_highlight_style();
         let mut rendered_lines = HashMap::new();
         let mut items = Vec::with_capacity(window.len());
         let mut image_rows = Vec::new();
@@ -1179,12 +1182,12 @@ impl Output for Preview {
                     let first_global = layout_idx as i32 - layout_line.wrap_idx as i32;
                     image_rows.push((logical_idx, first_global));
                 }
-                logical_line.render(&ctx)
+                match search_term {
+                    Some(term) => highlight_line_lowered(logical_line.render(&ctx), term, search_style),
+                    None => logical_line.render(&ctx),
+                }
             });
             let mut line = layout_line.render(logical_line, rendered_line, &ctx);
-            if let Some(term) = self.search.term() {
-                line = highlight_line(line, term, self.theme.search_highlight_style());
-            }
 
             if let Some((sel_start, sel_end)) = self
                 .selection
