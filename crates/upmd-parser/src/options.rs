@@ -60,16 +60,18 @@ pub fn parse(input: &str) -> Options {
 fn parse_attrs(input: &str) -> (HashMap<String, String>, Vec<String>) {
     let mut map = HashMap::new();
     let regex = attrs_regex();
-    let mut errors = Vec::new();
-
-    // Track which byte ranges are consumed by valid attribute pairs.
-    let mut covered = vec![false; input.len()];
+    let mut unconsumed = String::new();
+    let mut prev_end = 0;
 
     for caps in regex.captures_iter(input) {
         let m = caps.get(0).unwrap();
-        for i in m.range() {
-            covered[i] = true;
-        }
+        // ponytail: gaps are small; single-pass gap scan, no bitmap alloc.
+        unconsumed.extend(
+            input[prev_end..m.start()]
+                .chars()
+                .filter(|c| !c.is_whitespace() && *c != '[' && *c != ']' && *c != ','),
+        );
+        prev_end = m.end();
 
         let id = caps.name("ID").unwrap().as_str().to_string();
         let value = caps
@@ -80,15 +82,13 @@ fn parse_attrs(input: &str) -> (HashMap<String, String>, Vec<String>) {
             .to_string();
         map.insert(id, value);
     }
+    unconsumed.extend(
+        input[prev_end..]
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '[' && *c != ']' && *c != ','),
+    );
 
-    // Check for text that isn't part of any attribute pair, bracket
-    // structure, commas, or whitespace. This catches `[name:foo badvalue]`.
-    let unconsumed: String = input
-        .char_indices()
-        .filter(|(i, _)| !covered[*i])
-        .map(|(_, c)| c)
-        .filter(|c| !c.is_whitespace() && *c != '[' && *c != ']' && *c != ',')
-        .collect();
+    let mut errors = Vec::new();
     if !unconsumed.is_empty() {
         errors.push(format!("unrecognized attribute syntax: {unconsumed}"));
     }
