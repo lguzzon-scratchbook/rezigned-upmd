@@ -117,6 +117,14 @@ pub struct Preview {
     mode: Cell<RenderMode>,
     /// Prefix sums of heading counts per logical line; rebuilt on length change.
     heading_prefix: RefCell<Vec<usize>>,
+    /// False until first full rebuild runs.
+    built_once: Cell<bool>,
+    /// Hash of source at last full rebuild.
+    built_source_hash: Cell<u64>,
+    /// Mode at last full rebuild.
+    built_mode: Cell<RenderMode>,
+    /// Set by set_theme; consumed by next rebuild_view.
+    theme_bumped: Cell<bool>,
 }
 
 #[derive(KeyMap, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -189,6 +197,10 @@ impl Preview {
             image_base_dir,
             mode: Cell::new(RenderMode::Visual),
             heading_prefix: RefCell::new(Vec::new()),
+            built_once: Cell::new(false),
+            built_source_hash: Cell::new(0),
+            built_mode: Cell::new(RenderMode::Visual),
+            theme_bumped: Cell::new(false),
         };
         preview.rebuild_view(outputs);
         if !preview.layout_lines.is_empty() {
@@ -244,9 +256,35 @@ impl Preview {
     ///
     /// Called when the markdown source changes (new document, code output update)
     /// or when the theme / inline cap changes.
+    /// Skips the full rebuild when nothing dirty changed: no task dirty flag,
+    /// source hash unchanged, same mode, no theme bump. Forced paths
+    /// (resize/theme/mode-toggle/scroll) call the width/layout variants
+    /// directly or bump state first, so they still rebuild.
     #[tracing::instrument(level = "info", skip_all, fields(lines))]
     pub fn rebuild_view(&mut self, outputs: &HashMap<CodeId, Task>) {
+        // ponytail: hash source (not full compare); collision ceiling negligible for skip hint.
+        let source_hash = {
+            use std::hash::{DefaultHasher, Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            self.source.hash(&mut hasher);
+            hasher.finish()
+        };
+        let any_dirty = outputs.values().any(|t| t.dirty);
+        let source_changed = source_hash != self.built_source_hash.get();
+        let mode_changed = self.mode.get() != self.built_mode.get();
+        if self.built_once.get()
+            && !any_dirty
+            && !source_changed
+            && !mode_changed
+            && !self.theme_bumped.get()
+        {
+            return;
+        }
         self.rebuild_view_at_width(outputs, self.layout_lines.last_width());
+        self.built_once.set(true);
+        self.built_source_hash.set(source_hash);
+        self.built_mode.set(self.mode.get());
+        self.theme_bumped.set(false);
     }
 
     fn rebuild_view_at_width(&mut self, outputs: &HashMap<CodeId, Task>, width: usize) {
@@ -674,6 +712,7 @@ impl Preview {
         self.theme.clone_from(theme);
         self.logical_lines.iter().for_each(|l| l.clear_cache());
         self.markup_line_cache.clear();
+        self.theme_bumped.set(true);
     }
 
     pub fn selected_code_id(&self) -> Option<CodeId> {

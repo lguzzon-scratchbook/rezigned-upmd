@@ -845,7 +845,9 @@ impl LogicalLine {
 /// Returns line text eligible for batched syntax highlighting.
 fn batch_text(line: &LogicalLine) -> Option<&LazyText> {
     match &line.source {
-        LogicalLineSource::Markup(text) | LogicalLineSource::Html(text) => Some(text),
+        LogicalLineSource::Markup(text)
+        | LogicalLineSource::Html(text)
+        | LogicalLineSource::CodeBody(text) => Some(text),
         _ => None,
     }
 }
@@ -858,7 +860,9 @@ pub(super) fn prepare_lines(
 ) -> usize {
     let same_batch =
         |left: &LogicalLine, right: &LogicalLine| match (batch_text(left), batch_text(right)) {
-            (Some(left), Some(right)) => left.language == right.language,
+            (Some(ltext), Some(rtext)) => {
+                ltext.language == rtext.language && left.code_id == right.code_id
+            }
             (None, None) => true,
             _ => false,
         };

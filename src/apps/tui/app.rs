@@ -189,8 +189,12 @@ impl App {
             .map(|receiver| exec::stream_rx(id, receiver, Msg::StreamUpdate));
 
         if command.is_none() {
+            if let Some(buf) = self.tasks.get_mut(id) {
+                buf.dirty = true;
+            }
             self.content.prefer_status_gutter_for(id);
             self.content.rebuild(self.tasks.buffers());
+            self.tasks.clear_dirty();
         }
         self.sync_task_statuses();
         command
@@ -557,7 +561,9 @@ impl App {
                 } else {
                     buf.scroll_inline_down(self.content.inline_max_lines());
                 }
+                buf.dirty = true;
                 self.content.rebuild(self.tasks.buffers());
+                self.tasks.clear_dirty();
             }
         }
     }

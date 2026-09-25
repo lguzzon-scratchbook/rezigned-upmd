@@ -58,7 +58,7 @@ impl Tasks {
         };
         let is_out = matches!(stream, Stream::Out(_));
         let force_rebuild = exec::handle_stream(task, stream);
-        if is_out {
+        if is_out || force_rebuild {
             task.dirty = true;
         }
         force_rebuild
