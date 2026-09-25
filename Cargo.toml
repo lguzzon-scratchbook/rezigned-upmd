@@ -65,6 +65,15 @@ tempfile = "3.27"
 [dev-dependencies]
 insta = "1.47.2"
 
+[[bench]]
+name = "parse_bench"
+harness = false
+
+[[bench]]
+name = "runner_bench"
+harness = false
+
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
