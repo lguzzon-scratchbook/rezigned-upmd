@@ -98,3 +98,19 @@ latency — if p50 rises 10%, throughput should fall ~9%.
    of `Language`, repeated `which` lookup.
 5. Fix, re-bench, update baseline JSON if the new number is the intended
    trade-off (note reason in PR).
+
+## Dashboard
+
+Static page at `benches/dashboard/index.html`, history in
+`benches/history/history.json`. Serve repo root (`python3 -m http.server`),
+open `benches/dashboard/`. Polls history every 5s; no reload needed.
+Cards show current value, % vs previous, trend line, dashed ±5% threshold
+vs first snapshot. Add KPI: one entry in `DEFS` (`key`, `label`, `unit`,
+`get`, `lowerBetter`).
+
+Record a snapshot after benching:
+
+```sh
+cargo bench --bench parse_bench --bench runner_bench
+python3 scripts/bench_snapshot.py   # appends target/bench/*.json to history
+```

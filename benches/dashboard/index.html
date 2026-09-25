@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>upmd bench dashboard</title>
+<style>
+:root{color-scheme:dark light;--bg:#111;--card:#1b1b1b;--fg:#eee;--mut:#999;--up:#f66;--dn:#4c4}
+body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg);margin:0;padding:16px}
+header{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
+#live{color:var(--dn)}#meta{color:var(--mut);font-size:12px}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;margin-top:12px}
+.card{background:var(--card);border-radius:8px;padding:10px 12px}
+.card h3{margin:0 0 2px;font-size:14px}
+.sub{color:var(--mut);font-size:12px;margin-bottom:6px}
+canvas{width:100%;height:120px;display:block}
+.val{font-size:20px;font-variant-numeric:tabular-nums}
+.d{font-size:12px;padding:1px 6px;border-radius:8px}
+.bad{background:#422;color:#f99}.good{background:#243;color:#9d9}.flat{background:#333;color:#ccc}
+.th{color:var(--mut);font-size:11px}
+</style>
+<header>
+<h1>upmd benchmarks</h1>
+<span id="live">● live</span>
+<span id="meta"></span>
+</header>
+<div id="grid"></div>
+<script>
+// Add KPI: {key, label, unit, get(r)=>number|null, lowerBetter}
+const DEFS=[
+ {key:"parse_small",label:"parse_small p50",unit:"ns",lowerBetter:1,get:r=>r.parse_small?.p50_ns},
+ {key:"parse_large",label:"parse_large p50",unit:"ns",lowerBetter:1,get:r=>r.parse_large?.p50_ns},
+ {key:"parse_small_thr",label:"parse_small throughput",unit:"B/s",lowerBetter:0,get:r=>r.parse_small?.throughput_bps},
+ {key:"parse_large_thr",label:"parse_large throughput",unit:"B/s",lowerBetter:0,get:r=>r.parse_large?.throughput_bps},
+ {key:"plan_bash",label:"plan_bash p50",unit:"ns",lowerBetter:1,get:r=>r.plan_bash?.p50_ns},
+ {key:"plan_sh",label:"plan_sh p50",unit:"ns",lowerBetter:1,get:r=>r.plan_sh?.p50_ns},
+ {key:"plan_python",label:"plan_python p50",unit:"ns",lowerBetter:1,get:r=>r.plan_python?.p50_ns},
+ {key:"plan_js",label:"plan_js p50",unit:"ns",lowerBetter:1,get:r=>r.plan_js?.p50_ns},
+ {key:"plan_go",label:"plan_go p50",unit:"ns",lowerBetter:1,get:r=>r.plan_go?.p50_ns},
+ {key:"plan_rust",label:"plan_rust p50",unit:"ns",lowerBetter:1,get:r=>r.plan_rust?.p50_ns},
+];
+const URL="../history/history.json";
+let last="";
+function fmt(v,u){
+ if(v==null)return"–";
+ if(u==="B/s"){if(v>=1e6)return(v/1e6).toFixed(1)+" MB/s";if(v>=1e3)return(v/1e3).toFixed(1)+" kB/s";return Math.round(v)+" B/s"}
+ if(v>=1e6)return(v/1e6).toFixed(2)+" ms";
+ if(v>=1e3)return(v/1e3).toFixed(1)+" µs";
+ return Math.round(v)+" ns";
+}
+function draw(cv,vals,thr){
+ const dpr=devicePixelRatio||1,W=cv.clientWidth,H=cv.clientHeight;
+ cv.width=W*dpr;cv.height=H*dpr;
+ const c=cv.getContext("2d");c.scale(dpr,dpr);c.clearRect(0,0,W,H);
+ const xs=vals.filter(v=>v!=null);if(!xs.length)return;
+ let mn=Math.min(...xs,thr??1/0),mx=Math.max(...xs,thr??-1/0);
+ if(mn===mx){mn*=.9;mx*=1.1}const pad=(mx-mn)*.15;mn-=pad;mx+=pad;
+ const X=i=>8+i*(W-16)/Math.max(vals.length-1,1),Y=v=>H-14-(v-mn)/(mx-mn)*(H-28);
+ c.strokeStyle="#555";c.beginPath();c.moveTo(8,1);c.lineTo(8,H-14);c.lineTo(W-2,H-14);c.stroke();
+ if(thr!=null){c.strokeStyle="#a80";c.setLineDash([4,3]);c.beginPath();c.moveTo(8,Y(thr));c.lineTo(W-2,Y(thr));c.stroke();c.setLineDash([])}
+ c.strokeStyle="#4af";c.lineWidth=1.5;c.beginPath();
+ let s=false;vals.forEach((v,i)=>{if(v==null){s=false;return}const x=X(i),y=Y(v);s?c.lineTo(x,y):c.moveTo(x,y);s=true});c.stroke();
+ c.fillStyle="#4af";vals.forEach((v,i)=>{if(v==null)return;c.beginPath();c.arc(X(i),Y(v),2.5,0,7);c.fill()});
+}
+async function tick(){
+ let h;try{h=await(await fetch(URL,{cache:"no-store"})).json()}catch(e){meta("no data: serve repo root, open benches/dashboard/");return}
+ const s=JSON.stringify(h);if(s===last)return;last=s;
+ meta(`${h.length} snapshots · ${h[h.length-1]?.commit??""} · updated ${new Date().toLocaleTimeString()}`);
+ const g=document.getElementById("grid");g.innerHTML="";
+ for(const d of DEFS){
+  const vals=h.map(x=>d.get(x.results));
+  const cur=[...vals].reverse().find(v=>v!=null),prev=vals.slice(0,-1).reverse().find(v=>v!=null);
+  const base=vals.find(v=>v!=null);
+  const thr=base==null?null:base*(d.lowerBetter?1.05:.95); // ponytail: per-KPI tuned thresholds when history grows
+  let cls="flat",txt="n/a";
+  if(cur!=null&&prev){const p=(cur-prev)/prev*100;txt=(p>=0?"+":"")+p.toFixed(1)+"% vs prev";
+   cls=Math.abs(p)<0.1?"flat":(p<0)===!!d.lowerBetter?"good":"bad"}
+  const el=document.createElement("div");el.className="card";
+  el.innerHTML=`<h3>${d.label}</h3><div class="sub">${h[0].ts.slice(0,10)} → ${h[h.length-1].ts.slice(0,10)} · ${d.unit}</div>
+   <span class="val">${fmt(cur,d.unit)}</span> <span class="d ${cls}">${txt}</span><canvas height="120"></canvas>
+   <div class="th">dashed = ±5% vs first snapshot (${fmt(thr,d.unit)})</div>`;
+  g.appendChild(el);draw(el.querySelector("canvas"),vals,thr);
+ }
+}
+function meta(t){document.getElementById("meta").textContent=t}
+tick();setInterval(tick,5000); // ponytail: WebSocket/SSE when backend exists
+</script>
+</html>
