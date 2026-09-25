@@ -205,9 +205,15 @@ impl<'a> ParseState<'a> {
     //
     // Heading ::= InlineContent
     fn parse_heading(&mut self, level: HeadingLevel, source_range: Range<usize>) -> NodeKind {
-        let spans = self.parse_inline_content(TagEnd::Heading(level));
-        let text = semantic_text(&spans, self.source).trim().to_string();
-        let spans = trim_spans(spans, self.source);
+        let spans = trim_spans(
+            self.parse_inline_content(TagEnd::Heading(level)),
+            self.source,
+        );
+        // ponytail: single collect; copy only when edges need trimming.
+        let mut text = semantic_text(&spans, self.source);
+        if text.trim().len() != text.len() {
+            text = text.trim().to_string();
+        }
         let level = level as u8;
         self.headings.push(super::Heading {
             level,
@@ -222,10 +228,6 @@ impl<'a> ParseState<'a> {
     // CodeBlock ::= (Text | Break)*
     // Empty code blocks do not produce a node.
     fn parse_code_block(&mut self, kind: CodeBlockKind<'a>) -> Option<NodeKind> {
-        let opts = match &kind {
-            CodeBlockKind::Fenced(info) => info.to_string(),
-            CodeBlockKind::Indented => String::new(),
-        };
         let mut content = String::new();
         loop {
             match self.iter.next() {
@@ -236,11 +238,15 @@ impl<'a> ParseState<'a> {
                 _ => {}
             }
         }
-        let content = content.trim_end_matches('\n').to_string();
+        // ponytail: truncate in place; single emptiness scan, no temp String.
+        content.truncate(content.trim_end_matches('\n').len());
         if content.trim().is_empty() {
             return None;
         }
-        let options = options::parse(&opts);
+        let options = match &kind {
+            CodeBlockKind::Fenced(info) if !info.is_empty() => options::parse(info),
+            _ => options::parse(""),
+        };
         let code_id = self.codes.push(content, options);
         Some(NodeKind::Code(code_id))
     }
@@ -565,7 +571,10 @@ fn text_span(
     text: &str,
     stack: &[InlineStyle],
 ) -> InlineSpan {
-    let text = if source.get(range.clone()) == Some(text) {
+    // ponytail: length pre-check skips byte compare on mismatch.
+    let text = if text.len() == range.end.saturating_sub(range.start)
+        && source.get(range.clone()) == Some(text)
+    {
         SourceText::Source(range)
     } else {
         SourceText::from(text)
@@ -608,8 +617,13 @@ fn trim_spans(mut spans: Vec<InlineSpan>, source: &str) -> Vec<InlineSpan> {
         .iter()
         .rposition(|span| !span.text(source).trim_end_matches(TRIM_CHARS).is_empty())
         .map_or(start, |index| index + 1);
-    spans.drain(end..);
+    // ponytail: one memmove (drain head) + truncate tail, not two drains.
+    if start >= end {
+        spans.clear();
+        return spans;
+    }
     spans.drain(..start);
+    spans.truncate(end - start);
 
     if let Some(first) = spans.first_mut() {
         trim_span_start(first, source);
@@ -621,8 +635,11 @@ fn trim_spans(mut spans: Vec<InlineSpan>, source: &str) -> Vec<InlineSpan> {
 }
 
 fn trim_span_start(span: &mut InlineSpan, source: &str) {
-    let trim_bytes =
-        span.text(source).len() - span.text(source).trim_start_matches(TRIM_CHARS).len();
+    // ponytail: resolve once; was two span.text() calls.
+    let trim_bytes = {
+        let text = span.text(source);
+        text.len() - text.trim_start_matches(TRIM_CHARS).len()
+    };
     match &mut span.text {
         SourceText::Source(range) => range.start += trim_bytes,
         SourceText::Owned(text) => *text = text[trim_bytes..].into(),
