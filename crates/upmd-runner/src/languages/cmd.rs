@@ -3,7 +3,7 @@ use crate::{CodeInput, ExecutionPlan, FifoPaths, LanguageRunner, RunnerOptions, 
 use anyhow::Result;
 
 macro_rules! impl_windows_runner {
-    ($type:ty, $source_cmd:expr, $env_cmd:expr, $cwd_cmd:expr, $quote_fn:expr, $sep:expr) => {
+    ($type:ty, $source_cmd:expr, $env_cmd:expr, $cwd_cmd:expr, $quote_fn:expr, $sep:expr, $wrap_open:expr, $wrap_close:expr) => {
         impl LanguageRunner for $type {
             fn plan<'a>(&self, code: &CodeInput<'a>) -> Result<ExecutionPlan<'a>> {
                 let mut plan = ExecutionPlan::new();
@@ -32,8 +32,8 @@ macro_rules! impl_windows_runner {
                         let state_fifo = $quote_fn(&fifos.state_fifo.display().to_string());
                         plan.wrap(move |cmds| {
                             format!(
-                                "{cmds}\n$({} {} {}) > {}\n",
-                                $env_cmd, $sep, $cwd_cmd, state_fifo
+                                "{cmds}\n{}{} {} {}{} > {}\n",
+                                $wrap_open, $env_cmd, $sep, $cwd_cmd, $wrap_close, state_fifo
                             )
                         });
                     }
@@ -67,14 +67,16 @@ macro_rules! impl_windows_runner {
 
 // `&` is the unconditional command separator in cmd.exe; `;` is the statement
 // separator in PowerShell and works on PowerShell 5.1 as well as 7+.
-impl_windows_runner!(Cmd, "", "set", "echo %cd%", cmd_quote, "&");
+impl_windows_runner!(Cmd, "", "set", "echo %cd%", cmd_quote, "&", "(", ")");
 impl_windows_runner!(
     PowerShell,
     ".",
     "Get-ChildItem Env: | ForEach-Object { \"$($_.Name)=$($_.Value)\" }",
     "(Get-Location).Path",
     powershell_quote,
-    ";"
+    ";",
+    "$(",
+    ")"
 );
 
 impl Cmd {
@@ -289,7 +291,7 @@ echo hello\n\
         let script = assemble(&plan, "/tmp/ws");
         let expected = "\
 . /tmp/ws/script_1.ps1\n\
-(Get-ChildItem Env: | ForEach-Object { \"$($_.Name)=$($_.Value)\" } ; (Get-Location).Path) > '/tmp/state/state.fifo'\n";
+$(Get-ChildItem Env: | ForEach-Object { \"$($_.Name)=$($_.Value)\" } ; (Get-Location).Path) > '/tmp/state/state.fifo'\n";
         assert_eq!(script, expected);
     }
 
@@ -307,7 +309,7 @@ echo hello\n\
         let script = assemble(&plan, "/tmp/ws");
         let expected = "\
 Write-Host 'hello'\n\
-(Get-ChildItem Env: | ForEach-Object { \"$($_.Name)=$($_.Value)\" } ; (Get-Location).Path) > '/tmp/state/state.fifo'\n";
+$(Get-ChildItem Env: | ForEach-Object { \"$($_.Name)=$($_.Value)\" } ; (Get-Location).Path) > '/tmp/state/state.fifo'\n";
         assert_eq!(script, expected);
     }
 
@@ -326,7 +328,7 @@ Write-Host 'hello'\n\
         let script = assemble(&plan, r"C:\tmp\ws");
 
         assert!(script.contains(
-            r#"(Get-ChildItem Env: | ForEach-Object { "$($_.Name)=$($_.Value)" } ; (Get-Location).Path) > 'C:\tmp\state ''quoted''\state.fifo'"#
+            r#"$(Get-ChildItem Env: | ForEach-Object { "$($_.Name)=$($_.Value)" } ; (Get-Location).Path) > 'C:\tmp\state ''quoted''\state.fifo'"#
         ));
     }
 

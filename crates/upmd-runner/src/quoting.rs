@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn test_cmd_quote_double_quote() {
-        assert_eq!(cmd_quote(r#"say "hi""#), r#""say ""hi"""#);
+        assert_eq!(cmd_quote(r#"say "hi""#), r#""say ""hi""""#);
     }
 
     #[test]
