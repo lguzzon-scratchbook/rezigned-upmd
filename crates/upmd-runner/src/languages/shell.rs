@@ -108,17 +108,16 @@ impl LanguageRunner for Fish {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        workspace::{TempWorkspace, WorkspaceExecutionExt},
-        FifoPaths, Kind, Language, StateCaptureContext,
-    };
-    use std::path::PathBuf;
+    use crate::{FifoPaths, Finished, Kind, Language, StateCaptureContext};
+    use std::path::{Path, PathBuf};
 
-    // Thin wrapper: build_script now lives in WorkspaceExecutionExt, so we
-    // just point a TempWorkspace at `root` and delegate. No more duplicate logic.
+    // Thin wrapper: finishing lives in ExecutionPlan, so we delegate to
+    // `finish` and unwrap the script. No more adapter indirection.
     fn assemble(plan: &ExecutionPlan, root: &str) -> String {
-        let ws = TempWorkspace::from_path(root);
-        ws.build_script(plan).expect("build_script failed")
+        match plan.finish(Path::new(root)).expect("finish failed") {
+            Finished::Script { script, .. } => script,
+            Finished::Direct { .. } => panic!("expected script plan"),
+        }
     }
 
     fn no_capture() -> StateCaptureContext {
@@ -260,9 +259,8 @@ exit $RET";
     }
 
     // --- Inline bypass tests ---
-    // These cover the fix in build_script / assemble: single-element commands on
-    // non-file plans must be emitted verbatim, not quoted. Before the fix,
-    // `echo hello` would become `'echo hello'` (a literal command name) and fail.
+    // These cover `finish`: single-element commands on non-file plans emit
+    // raw, not quoted. Before the fix, `echo hello` became `'echo hello'`.
 
     #[test]
     fn test_inline_with_spaces_not_quoted() {
@@ -344,8 +342,8 @@ exit $RET";
 
     #[test]
     fn test_file_based_args_still_quoted() {
-        // File-based (multi-line) commands go through format_args and should
-        // still have their paths resolved. The bypass must not affect them.
+        // File-based (multi-line) commands go through `finish` path resolution
+        // and quoting. The bypass must not affect them.
         let lang = bash_lang();
         let state = no_capture();
         let input = CodeInput {

@@ -120,29 +120,16 @@ pub fn execute(
     };
     let (tx, rx) = bounded(crate::apps::config::STREAM_CHANNEL_SIZE);
 
-    let cmd = if let Some(program) = &plan.executable {
+    let cmd = match plan.finish(ctx.target_dir())? {
         // Direct exec: spawn the binary directly, no shell wrapper.
-        // Resolve file args against the workspace target dir so the binary
-        // can find scripts created by execute_plan().
-        let target = ctx.target_dir();
-        let mut cmd = vec![OsString::from(&program.binary)];
-        for arg in &program.args {
-            let resolved = plan
-                .files
-                .iter()
-                .find(|(p, _)| p.to_string_lossy() == arg.as_str())
-                .map(|(p, _)| target.join(p).into_os_string())
-                .unwrap_or_else(|| OsString::from(arg));
-            cmd.push(resolved);
+        Finished::Direct { argv } => argv,
+        // Script-based: run the finished script via shell -c.
+        Finished::Script { script, .. } => {
+            let shell_prefix = resolve_shell(code.id, &language, &*runner)?;
+            let mut cmd: Vec<OsString> = shell_prefix;
+            cmd.push(OsString::from(script));
+            cmd
         }
-        cmd
-    } else {
-        // Script-based: build a shell script from commands and run via shell -c
-        let script = WorkspaceExecutionExt::build_script(&*ctx, &plan)?;
-        let shell_prefix = resolve_shell(code.id, &language, &*runner)?;
-        let mut cmd: Vec<OsString> = shell_prefix;
-        cmd.push(OsString::from(script));
-        cmd
     };
     tracing::debug!(code_id = code.id, language = %language.name, argv = ?cmd, "executing");
     let mut p = Process::new(cmd, tx.clone(), size, working_dir, state)?;
@@ -185,13 +172,9 @@ fn resolve_runner(
 ///
 /// Only called for script-based plans (shell languages and multi-command
 /// compiled languages). Shell languages use `resolve_binary()` to find
-/// the correct shell, then map the shell name to the expected exec flag:
-/// - `-c` for POSIX shells (sh, bash, zsh, fish)
-/// - `/c` for cmd.exe
-/// - `-Command` for PowerShell
-///
-/// For non-shell languages this path is never reached - their plans use
-/// `executable` for direct exec instead.
+/// the correct shell; the exec flag mapping lives next to the runners
+/// `ShellQuoteStyle` knowledge. For non-shell languages this path is never
+/// reached - their plans use direct exec instead.
 fn resolve_shell(
     code_id: upmd_parser::CodeId,
     language: &Language,
@@ -210,7 +193,7 @@ fn resolve_shell(
                 .unwrap_or("?");
             tracing::error!(code_id = code_id, language = %language.name, bin = %bin, "binary not found");
         })?;
-        let flag = exec_flag_for_shell(&path);
+        let flag = ShellQuoteStyle::exec_flag(&path);
         (path, flag)
     } else {
         (default_shell(), default_shell_flag())
@@ -239,18 +222,6 @@ fn default_shell_flag() -> &'static str {
     "/c"
 }
 
-fn exec_flag_for_shell(path: &str) -> &'static str {
-    let name = std::path::Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(path);
-    match name {
-        "cmd" => "/c",
-        "powershell" | "pwsh" => "-Command",
-        _ => "-c",
-    }
-}
-
 /// Builds the environment variable list for the PTY process: filters out
 /// internal shell vars, injects UPMD_DIR / UPMD_FILE / UPMD_FILE_PATH, and
 /// adds state capture env vars when enabled.
@@ -270,11 +241,10 @@ fn build_envs(
         "UPMD_DIR".to_string(),
         crate::apps::target_dir()?.to_string_lossy().to_string(),
     );
-    if let Some((file_path, _)) = plan.files.first() {
-        let abs_path = target_dir.join(file_path);
+    if let Some(abs_path) = plan.primary_file(target_dir) {
         envs.insert(
             "UPMD_FILE".to_string(),
-            file_path
+            abs_path
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()

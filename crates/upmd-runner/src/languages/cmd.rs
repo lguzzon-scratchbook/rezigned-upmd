@@ -94,11 +94,8 @@ impl PowerShell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        workspace::{TempWorkspace, WorkspaceExecutionExt},
-        FifoPaths, Kind, Language, StateCaptureContext,
-    };
-    use std::path::PathBuf;
+    use crate::{FifoPaths, Finished, Kind, Language, StateCaptureContext};
+    use std::path::{Path, PathBuf};
 
     fn no_capture() -> StateCaptureContext {
         StateCaptureContext {
@@ -129,8 +126,10 @@ mod tests {
     }
 
     fn assemble(plan: &ExecutionPlan, root: &str) -> String {
-        let ws = TempWorkspace::from_path(root);
-        ws.build_script(plan).expect("build_script failed")
+        match plan.finish(Path::new(root)).expect("finish failed") {
+            Finished::Script { script, .. } => script,
+            Finished::Direct { .. } => panic!("expected script plan"),
+        }
     }
 
     fn cmd_lang() -> Language {

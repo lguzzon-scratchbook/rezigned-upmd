@@ -23,15 +23,16 @@
 //! let plan = runner.plan(&input).unwrap();
 //! ```
 
+use crate::quoting::quote_if_needed;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
     collections::HashMap,
-    path::PathBuf,
+    ffi::OsString,
+    path::{Path, PathBuf},
     sync::{LazyLock, Mutex},
 };
-
 static WHICH_CACHE: LazyLock<Mutex<HashMap<String, Option<PathBuf>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -122,6 +123,15 @@ pub struct Program {
     pub binary: String,
     pub args: Vec<String>,
 }
+/// Finished execution: either a direct argv or a shell script string.
+/// Single seam where plans become runnable output; adapters only create files.
+/// `Script.shell` is left empty by `finish` and filled by the execution
+/// engine (`resolve_shell`), which owns binary resolution.
+#[derive(Debug, Clone)]
+pub enum Finished {
+    Direct { argv: Vec<OsString> },
+    Script { script: String, shell: String },
+}
 
 /// Shell quoting style used when an execution plan is assembled as a script.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -130,6 +140,37 @@ pub enum ShellQuoteStyle {
     Posix,
     Cmd,
     PowerShell,
+}
+impl ShellQuoteStyle {
+    /// Statement separator for joining commands. Module-level knowledge kept
+    /// next to the quoting interface so script assembly has one seam.
+    ///
+    /// PowerShell 5.1 does not support `&&`, so it uses `;`. POSIX shells
+    /// and cmd.exe both support `&&` for conditional chaining.
+    pub fn separator(self) -> &'static str {
+        match self {
+            ShellQuoteStyle::PowerShell => "; ",
+            ShellQuoteStyle::Posix | ShellQuoteStyle::Cmd => " && ",
+        }
+    }
+
+    /// Maps a shell binary path to its execute flag. Lives next to the
+    /// quoting style because both switch on shell identity.
+    ///
+    /// - `-c` for POSIX shells (sh, bash, zsh, fish)
+    /// - `/c` for cmd.exe
+    /// - `-Command` for PowerShell
+    pub fn exec_flag(shell_path: &str) -> &'static str {
+        let name = Path::new(shell_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(shell_path);
+        match name {
+            "cmd" => "/c",
+            "powershell" | "pwsh" => "-Command",
+            _ => "-c",
+        }
+    }
 }
 
 /// Execution plan containing all steps needed to run code.
@@ -242,6 +283,85 @@ impl<'a> ExecutionPlan<'a> {
             self.env_vars.insert(key.clone(), value.clone());
         }
         self
+    }
+
+    /// Finishes the plan into runnable output. Module owns all finishing
+    /// logic so adapters stay thin file-creation seams.
+    ///
+    /// - `executable` plans become `Direct` argv; file args and `./`-prefixed
+    ///   args resolve against `target_dir` (unified grammar for both paths).
+    /// - `commands` plans become `Script`; single-element commands on
+    ///   non-file plans emit raw (inline bypass), file-based commands go
+    ///   through path resolution and quoting.
+    /// - `primary_file` exposes the backing file so `UPMD_FILE` injection
+    ///   routes through the same seam.
+    pub fn primary_file(&self, target_dir: &Path) -> Option<PathBuf> {
+        self.files.first().map(|(p, _)| target_dir.join(p))
+    }
+
+    pub fn finish(&self, target_dir: &Path) -> anyhow::Result<Finished> {
+        if let Some(program) = &self.executable {
+            let mut argv = vec![OsString::from(&program.binary)];
+            for arg in &program.args {
+                let s = arg.trim();
+                let resolved = if self.resolve_paths && s.starts_with("./") {
+                    target_dir.join(&s[2..]).into_os_string()
+                } else {
+                    self.files
+                        .iter()
+                        .find(|(p, _)| p.to_string_lossy() == arg.as_str())
+                        .map(|(p, _)| target_dir.join(p).into_os_string())
+                        .unwrap_or_else(|| OsString::from(arg))
+                };
+                argv.push(resolved);
+            }
+            return Ok(Finished::Direct { argv });
+        }
+        if self.commands.is_empty() {
+            anyhow::bail!("No commands in execution plan");
+        }
+        let sep = self.quote_style.separator();
+        let commands: String = self
+            .commands
+            .iter()
+            .enumerate()
+            .map(|(i, cmd)| {
+                let args = if !self.requires_file && cmd.len() == 1 {
+                    cmd[0].to_string()
+                } else {
+                    Self::format_args(cmd, self, target_dir).join(" ")
+                };
+                if i > 0 {
+                    format!("{sep}{args}")
+                } else {
+                    args
+                }
+            })
+            .collect();
+        let script = self.wrap.as_ref().map_or(commands.clone(), |w| w(commands));
+        Ok(Finished::Script {
+            script,
+            shell: String::new(),
+        })
+    }
+
+    fn format_args(cmd: &[Cow<'a, str>], plan: &ExecutionPlan<'a>, root: &Path) -> Vec<String> {
+        cmd.iter()
+            .enumerate()
+            .map(|(idx, arg)| {
+                let s = arg.trim();
+                if plan.resolve_paths && idx > 0 && s.starts_with("./") {
+                    return root.join(&s[2..]).display().to_string();
+                }
+                let resolved = plan
+                    .files
+                    .iter()
+                    .find(|(path, _)| path.to_string_lossy() == s)
+                    .map(|(path, _)| root.join(path).display().to_string())
+                    .unwrap_or_else(|| s.to_string());
+                quote_if_needed(&resolved, plan.quote_style)
+            })
+            .collect()
     }
 }
 

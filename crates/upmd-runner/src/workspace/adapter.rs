@@ -4,8 +4,6 @@
 //! and directories during code execution. Users of the upmd-runner crate can
 //! implement this trait to customize how files are created and managed.
 
-use crate::quoting::quote_if_needed;
-use crate::ShellQuoteStyle;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 /// Trait for workspace file operations.
@@ -71,10 +69,9 @@ pub trait WorkspaceAdapter {
 
 /// Extension trait for workspace operations related to execution plans.
 ///
-/// This trait provides higher-level operations that build upon the basic
-/// `WorkspaceAdapter` methods, specifically for working with execution plans.
-/// It remains language-agnostic, only dealing with file creation and
-/// directory resolution.
+/// Thin file-creation seam: creates plan files and resolves the working dir.
+/// All finishing (script assembly, arg resolution) lives in
+/// `ExecutionPlan::finish`.
 pub trait WorkspaceExecutionExt {
     /// Executes an execution plan by creating all required files.
     ///
@@ -88,28 +85,6 @@ pub trait WorkspaceExecutionExt {
     /// * `plan` - The execution plan
     /// * `fallback` - Fallback directory if plan doesn't specify one
     fn resolve_working_dir(&self, plan: &crate::ExecutionPlan, fallback: PathBuf) -> PathBuf;
-
-    /// Assembles the final shell script string from an execution plan.
-    ///
-    /// Single-element commands on non-file plans are emitted verbatim (inline
-    /// bypass) so that raw shell content like `echo hello world` is never
-    /// accidentally quoted. File-based commands go through [`format_args`] for
-    /// path resolution and quoting.
-    ///
-    /// [`format_args`]: WorkspaceExecutionExt::format_args
-    fn build_script(&self, plan: &crate::ExecutionPlan) -> Result<String>;
-
-    /// Formats command arguments, resolving `./` paths and quoting as needed.
-    ///
-    /// - Arguments at index > 0 that start with `./` are resolved against
-    ///   `target_dir()` when `plan.resolve_paths` is set.
-    /// - All other arguments are shell-quoted if they contain whitespace or
-    ///   special characters.
-    fn format_args<'a>(
-        &self,
-        cmd: &[std::borrow::Cow<'a, str>],
-        plan: &crate::ExecutionPlan,
-    ) -> Vec<String>;
 }
 
 /// Default implementation of `WorkspaceExecutionExt` for any type implementing `WorkspaceAdapter`.
@@ -127,78 +102,6 @@ impl<T: WorkspaceAdapter> WorkspaceExecutionExt for T {
             Some(wd) => self.target_dir().join(wd),
             None => fallback,
         }
-    }
-
-    fn build_script(&self, plan: &crate::ExecutionPlan) -> Result<String> {
-        use anyhow::bail;
-
-        if plan.commands.is_empty() {
-            bail!("No commands in execution plan");
-        }
-
-        let sep = command_separator(plan.quote_style);
-        let commands: String = plan
-            .commands
-            .iter()
-            .enumerate()
-            .map(|(i, cmd)| {
-                // Inline commands (single-line shell scripts) contain raw script
-                // content that should be passed directly without quoting/formatting.
-                // File-based commands use format_args for path resolution and quoting.
-                let args = if !plan.requires_file && cmd.len() == 1 {
-                    cmd[0].to_string()
-                } else {
-                    self.format_args(cmd, plan).join(" ")
-                };
-                if i > 0 {
-                    format!("{sep}{args}")
-                } else {
-                    args
-                }
-            })
-            .collect();
-
-        Ok(plan.wrap.as_ref().map_or(commands.clone(), |w| w(commands)))
-    }
-
-    fn format_args<'a>(
-        &self,
-        cmd: &[std::borrow::Cow<'a, str>],
-        plan: &crate::ExecutionPlan,
-    ) -> Vec<String> {
-        let root = self.target_dir();
-
-        cmd.iter()
-            .enumerate()
-            .map(|(idx, arg)| {
-                let s = arg.trim();
-
-                if plan.resolve_paths && idx > 0 && s.starts_with("./") {
-                    return root.join(&s[2..]).display().to_string();
-                }
-
-                let resolved = plan
-                    .files
-                    .iter()
-                    .find(|(path, _)| path.to_string_lossy() == s)
-                    .map(|(path, _)| root.join(path).display().to_string())
-                    .unwrap_or_else(|| s.to_string());
-
-                quote_if_needed(&resolved, plan.quote_style)
-            })
-            .collect()
-    }
-}
-
-/// Returns the command separator appropriate for the shell quoting style.
-///
-/// PowerShell 5.1 does not support `&&`, so it uses `;` as a statement
-/// separator. POSIX shells and cmd.exe both support `&&` for conditional
-/// chaining.
-fn command_separator(style: ShellQuoteStyle) -> &'static str {
-    match style {
-        ShellQuoteStyle::PowerShell => "; ",
-        ShellQuoteStyle::Posix | ShellQuoteStyle::Cmd => " && ",
     }
 }
 
@@ -297,6 +200,7 @@ impl Default for InMemoryWorkspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{quoting::quote_if_needed, ExecutionPlan, ShellQuoteStyle};
 
     #[test]
     fn test_quote_if_needed_plain() {
@@ -377,30 +281,32 @@ mod tests {
     }
 
     #[test]
-    fn test_build_script_uses_conditional_separator_for_cmd() {
-        use crate::ExecutionPlan;
-
+    fn test_finish_uses_conditional_separator_for_cmd() {
         let mut plan = ExecutionPlan::new();
         plan.quote_style = ShellQuoteStyle::Cmd;
         plan.command(["echo a"]);
         plan.command(["echo b"]);
 
-        let ws = crate::workspace::TempWorkspace::from_path("/tmp/ws");
-        let script = ws.build_script(&plan).unwrap();
-        assert_eq!(script, "echo a && echo b");
+        let finished = plan.finish(Path::new("/tmp/ws")).unwrap();
+        match finished {
+            crate::Finished::Script { script, .. } => assert_eq!(script, "echo a && echo b"),
+            other => panic!("expected script, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_build_script_uses_statement_separator_for_powershell() {
-        use crate::ExecutionPlan;
-
+    fn test_finish_uses_statement_separator_for_powershell() {
         let mut plan = ExecutionPlan::new();
         plan.quote_style = ShellQuoteStyle::PowerShell;
         plan.command(["Write-Host a"]);
         plan.command(["Write-Host b"]);
 
-        let ws = crate::workspace::TempWorkspace::from_path("/tmp/ws");
-        let script = ws.build_script(&plan).unwrap();
-        assert_eq!(script, "Write-Host a; Write-Host b");
+        let finished = plan.finish(Path::new("/tmp/ws")).unwrap();
+        match finished {
+            crate::Finished::Script { script, .. } => {
+                assert_eq!(script, "Write-Host a; Write-Host b")
+            }
+            other => panic!("expected script, got {other:?}"),
+        }
     }
 }
