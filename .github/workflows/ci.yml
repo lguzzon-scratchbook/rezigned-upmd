@@ -78,7 +78,7 @@ jobs:
           cargo bench --bench parse_bench
           cargo bench --bench runner_bench
       - name: Upload bench results
-        uses: actions/upload-artifact@b7c566a772e6ad8a0a5c9a833af36b6f39a6cc4e5f2 # v6.0.0
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: bench-results
           path: target/bench/*.json
