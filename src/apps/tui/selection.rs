@@ -271,39 +271,37 @@ impl SelectionState {
     /// Converts global mouse coordinates to a `(line_index, char_offset)` within
     /// a text widget.
     ///
-    /// `area` is the widget's `Rect`.  `content_offset` is the number of columns
-    /// from the left edge of `area` to the start of the text (borders + padding).
-    /// `line_at_row` is called with a visual row index and must return the
-    /// corresponding global line index and rendered `Line`.
+    /// `content` is the content `Rect` (widget area minus borders/padding,
+    /// e.g. `Viewport::content_rect`). The seam takes it directly so callers
+    /// never re-derive offsets. `line_at_row` is called with a visual row
+    /// index and must return the corresponding global line index and
+    /// rendered `Line`.
     pub fn mouse_to_position<F>(
-        area: Rect,
+        content: Rect,
         mouse_row: u16,
         mouse_col: u16,
-        content_offset: u16,
         mut line_at_row: F,
     ) -> Option<(usize, usize)>
     where
         F: FnMut(usize) -> Option<(usize, Line<'static>)>,
     {
-        if area.width == 0 {
+        if content.width == 0 || content.height == 0 {
             return None;
         }
 
-        let content_x = area.x + content_offset;
-        let content_y = area.y + 1; // below top border
-        let content_right = area.x + area.width.saturating_sub(1);
-        let content_bottom = area.y + area.height.saturating_sub(1);
+        let content_right = content.x.saturating_add(content.width);
+        let content_bottom = content.y.saturating_add(content.height);
 
-        if mouse_col < content_x
+        if mouse_col < content.x
             || mouse_col >= content_right
-            || mouse_row < content_y
+            || mouse_row < content.y
             || mouse_row >= content_bottom
         {
             return None;
         }
 
-        let rel_row = mouse_row.saturating_sub(content_y) as usize;
-        let target_col = mouse_col.saturating_sub(content_x) as usize;
+        let rel_row = mouse_row.saturating_sub(content.y) as usize;
+        let target_col = mouse_col.saturating_sub(content.x) as usize;
 
         let (global_line_idx, line) = line_at_row(rel_row)?;
         let char_offset = Self::char_offset_from_col(&line, target_col);

@@ -22,7 +22,7 @@
 //!   (one entry per terminal row) + `search` + `selection`.
 //! - Full rebuild: `rebuild_view` → `rebuild_view_at_width` (AST → logical via
 //!   `MarkdownRenderer::render`, then layout). Width-only: `resize` →
-//!   `rebuild_layout_lines*` (selection preserved via `LayoutLineIdentity`).
+//!   `rebuild_layout_lines*` (selection preserved via viewport identity).
 //! - Render path: `Output::render` → `prefetch_content` (`prepare_lines` batch
 //!   cache) → `LayoutLine::render_*` per visible row + `render_images`.
 //! - Interaction: `Component::update` (scroll/page), `select_code*` /
@@ -30,7 +30,7 @@
 //! - Search: `search` / `select_search_match` delegate to `search.rs`
 //!   (`PreviewSearch`); match highlight in `markdown.rs::highlight_line_lowered`.
 //! - Selection: `selection.rs` (`PreviewSelection`); mouse mapping via
-//!   `mouse_content_rel_row` / `code_id_at_mouse` / `mouse_to_pty_coords`.
+//!   `code_id_at_mouse` / `mouse_to_pty_coords` (rows via `Viewport`).
 //! - Line model: `LogicalLine` (content, `tui/markdown.rs`) vs `LayoutLine`
 //!   (row slice, `layout_lines.rs`). Char slicing in `tui/wrap.rs`
 //!   (`wrap_ranges`, `slice_line`, `CopyLine`).
@@ -46,9 +46,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use crate::apps::config::{
-    BORDER_HEIGHT, CODE_GUTTER_WIDTH, GUTTER_GLYPH, INLINE_MAX_LINES_DEFAULT,
-    INLINE_MAX_LINES_FRACTION, INLINE_MAX_LINES_MIN, OVERDRAW_FRACTION, PREVIEW_CONTENT_TOP_OFFSET,
-    PREVIEW_CONTENT_X_OFFSET, PREVIEW_FRAME_OVERHEAD,
+    CODE_GUTTER_WIDTH, GUTTER_GLYPH, INLINE_MAX_LINES_DEFAULT, INLINE_MAX_LINES_FRACTION,
+    INLINE_MAX_LINES_MIN, OVERDRAW_FRACTION, PREVIEW_CONTENT_X_OFFSET, PREVIEW_FRAME_OVERHEAD,
 };
 use crate::apps::theme::Theme;
 use crate::runner::CodeId;
@@ -58,16 +57,13 @@ use upmd_parser::{Codes, Document};
 
 use super::markdown::{
     highlight_line_lowered, prepare_lines, LineRenderContext, LogicalLine, LogicalLineSource,
-    MarkdownRenderer, RenderMode, SourcePosition,
+    MarkdownRenderer, RenderMode,
 };
 use super::selection::SelectionState;
 use super::wrap::{line_char_count, CopyLine};
 use crate::apps::task::Task;
 use crate::apps::tui::widgets::Spinner;
 
-const INLINE_PTY_MIN_PERCENT: usize = 40;
-const INLINE_PTY_MIN_ROWS: usize = 8;
-const CODE_NAVIGATION_CONTEXT_ROWS: usize = 3;
 use upmd_runtime::{
     runtimes::tui::{Input, Output},
     Component, Effect, NoOutcome,
@@ -77,6 +73,7 @@ mod images;
 mod layout_lines;
 mod search;
 mod selection;
+pub(crate) mod viewport;
 
 pub use images::image_base_dir;
 use images::ImageCache;
@@ -84,20 +81,9 @@ pub(crate) use images::{decode_image, DecodedImage};
 use layout_lines::{LayoutLine, LayoutLines};
 use search::PreviewSearch;
 use selection::PreviewSelection;
-
-/// Identifies a layout line across layout rebuilds.
-#[derive(Clone, Copy)]
-enum LayoutLineIdentity {
-    Code {
-        id: CodeId,
-        line_idx: usize,
-        wrap_idx: usize,
-    },
-    Document {
-        source_position: SourcePosition,
-        wrap_idx: usize,
-    },
-}
+use viewport::{
+    identity_of, inline_pty_rows, layout_extent_for_code, resolve, RebuildTarget, Viewport,
+};
 
 /// Markdown preview state, rendering, and interaction.
 pub struct Preview {
@@ -107,19 +93,16 @@ pub struct Preview {
     logical_lines: Vec<LogicalLine>,
     /// One entry per terminal row.
     layout_lines: LayoutLines,
-    state: RefCell<ListState>,
+    /// Owned scroll/selection geometry; ratatui `ListState` lives only at the
+    /// render seam as a throwaway adapter.
+    viewport: Viewport,
     theme: Theme,
     keymap: DerivedConfig<Action>,
     search: PreviewSearch,
     spinner: Spinner,
     inline_max_lines_cap: usize,
     inline_max_lines: Cell<usize>,
-    last_area: Cell<Rect>,
     selection: PreviewSelection,
-    /// If set, jump to this code block on the next layout rebuild.
-    target_block: Cell<Option<CodeId>>,
-    /// Transient: prefer this block's task status over active gutter.
-    prefer_status_gutter: Cell<Option<CodeId>>,
     /// Code blocks in document order with dense one-based IDs.
     code_index: Codes,
     /// Transient result of the last clipboard copy attempt (None = no copy).
@@ -197,17 +180,14 @@ impl Preview {
             nodes,
             logical_lines: vec![],
             layout_lines: LayoutLines::new(),
-            state: RefCell::new(ListState::default()),
+            viewport: Viewport::new(),
             theme: theme.clone(),
             keymap,
             search: PreviewSearch::new(),
             spinner: Spinner::default(),
             inline_max_lines_cap,
             inline_max_lines: Cell::new(INLINE_MAX_LINES_DEFAULT),
-            last_area: Cell::new(Rect::default()),
             selection: PreviewSelection::new(),
-            target_block: Cell::new(None),
-            prefer_status_gutter: Cell::new(None),
             copy_result: Cell::new(None),
             code_index: codes,
             code_prefix_overhead: HashMap::new(),
@@ -223,13 +203,13 @@ impl Preview {
         };
         preview.rebuild_view(outputs);
         if !preview.layout_lines.is_empty() {
-            preview.state.borrow_mut().select(Some(0));
+            preview.viewport.select(Some(0));
         }
         preview
     }
 
     pub fn prefer_status_gutter_for(&self, id: CodeId) {
-        self.prefer_status_gutter.set(Some(id));
+        self.viewport.prefer_status_gutter_for(id);
     }
 
     pub fn toggle_mode(&self) {
@@ -241,8 +221,8 @@ impl Preview {
 
     /// Requests loading of images in the viewport and a small overdraw margin.
     fn request_visible_images(&self) {
-        let viewport = self.layout_lines.last_height();
-        let offset = self.state.borrow().offset();
+        let viewport = self.viewport.height();
+        let offset = self.viewport.offset();
         let overdraw = viewport / OVERDRAW_FRACTION;
         let start = offset.saturating_sub(overdraw);
         let end = offset
@@ -265,9 +245,9 @@ impl Preview {
     }
 
     pub(crate) fn complete_image(&self, decoded: DecodedImage) {
-        let width = self.image_width(self.layout_lines.last_width());
+        let width = self.image_width(self.viewport.width());
         if self.images.borrow_mut().complete(decoded, width) {
-            self.rebuild_layout_lines(self.layout_lines.last_width());
+            self.rebuild_layout_lines(self.viewport.width());
         }
     }
 
@@ -299,7 +279,7 @@ impl Preview {
         {
             return;
         }
-        self.rebuild_view_at_width(outputs, self.layout_lines.last_width());
+        self.rebuild_view_at_width(outputs, self.viewport.width());
         self.built_once.set(true);
         self.built_source_hash.set(source_hash);
         self.built_mode.set(self.mode.get());
@@ -405,19 +385,22 @@ impl Preview {
         width: usize,
         previous_logical_lines: &[LogicalLine],
     ) {
-        let previous_selection = self.selected_layout_line_identity(previous_logical_lines);
-        let (previous_selected, previous_offset) = {
-            let state = self.state.borrow();
-            (state.selected(), state.offset())
-        };
+        let layout_before = self.layout_lines.borrow().clone();
+        let previous_selection = identity_of(
+            &layout_before,
+            previous_logical_lines,
+            self.viewport.selected(),
+        );
+        let (previous_selected, previous_offset) =
+            (self.viewport.selected(), self.viewport.offset());
         let previous_code_rows = previous_selected
             .and_then(|idx| {
-                self.layout_lines
+                layout_before
                     .get(idx)
                     .and_then(|line| line.code_id(previous_logical_lines))
             })
             .and_then(|id| {
-                self.layout_extent_for_code(id, previous_logical_lines)
+                layout_extent_for_code(&layout_before, previous_logical_lines, id)
                     .map(|(_, rows)| (id, rows))
             });
 
@@ -433,7 +416,7 @@ impl Preview {
     fn rebuild_layout_lines_from(
         &self,
         width: usize,
-        previous_selection: Option<LayoutLineIdentity>,
+        previous_selection: Option<viewport::LayoutLineIdentity>,
         previous_selected: Option<usize>,
         previous_offset: usize,
         previous_code_rows: Option<(CodeId, usize)>,
@@ -443,77 +426,62 @@ impl Preview {
         }
         let span = tracing::Span::current();
         let n_logical = self.logical_lines.len();
-        let selected = self.layout_lines.rebuild(
-            &self.logical_lines,
-            width,
-            &self.theme,
-            &self.target_block,
-            |line| {
+        self.layout_lines
+            .rebuild(&self.logical_lines, width, &self.theme, |line| {
                 if let Some(src) = line.image_src() {
                     self.images.borrow().rows(src, &self.image_base_dir)
                 } else {
                     1
                 }
-            },
-        );
-        if let Some(idx) = selected {
-            // Explicit jump → scroll to target.
-            let mut state = self.state.borrow_mut();
-            state.select(Some(idx));
-            *state.offset_mut() = idx;
-        } else if let Some(idx) = previous_selection.and_then(|id| self.layout_idx_for_identity(id))
-        {
-            // Passive rebuild → preserve viewport row, tail-follow if
-            // selected block's inline output grew past bottom.
-            let mut offset = previous_selected.map_or(previous_offset, |previous_idx| {
-                if idx >= previous_idx {
-                    previous_offset.saturating_add(idx - previous_idx)
-                } else {
-                    previous_offset.saturating_sub(previous_idx - idx)
-                }
             });
-            if let Some((code_id, previous_rows)) = previous_code_rows {
-                if self
-                    .layout_lines
-                    .get(idx)
-                    .is_some_and(|line| line.code_id(&self.logical_lines) == Some(code_id))
-                {
-                    offset =
-                        self.offset_following_grown_code_bottom(offset, code_id, previous_rows);
+        self.viewport.set_width(width);
+        let layout_after = self.layout_lines.borrow().clone();
+        // Deferred jump wins over preserve; Viewport owns the target cell.
+        let target = self
+            .viewport
+            .take_target()
+            .and_then(|id| self.layout_lines.find_code_start(id, &self.logical_lines))
+            .map(RebuildTarget::Jump)
+            .or_else(|| {
+                let idx = previous_selection
+                    .and_then(|id| resolve(&layout_after, &self.logical_lines, id))?;
+                // Passive rebuild → preserve viewport row, tail-follow if
+                // selected block's inline output grew past bottom.
+                let mut offset = previous_selected.map_or(previous_offset, |previous_idx| {
+                    if idx >= previous_idx {
+                        previous_offset.saturating_add(idx - previous_idx)
+                    } else {
+                        previous_offset.saturating_sub(previous_idx - idx)
+                    }
+                });
+                if let Some((code_id, previous_rows)) = previous_code_rows {
+                    if layout_after
+                        .get(idx)
+                        .is_some_and(|line| line.code_id(&self.logical_lines) == Some(code_id))
+                    {
+                        if let Some((end, rows)) =
+                            layout_extent_for_code(&layout_after, &self.logical_lines, code_id)
+                        {
+                            offset =
+                                self.viewport
+                                    .grown_bottom_offset(offset, end, rows, previous_rows);
+                        }
+                    }
                 }
-            }
-            let mut state = self.state.borrow_mut();
-            state.select(Some(idx));
-            *state.offset_mut() = offset;
+                Some(RebuildTarget::Preserve { idx, offset })
+            });
+        let emptied = self
+            .viewport
+            .rebuild_layout(self.layout_lines.len(), target);
+        if emptied {
+            self.selection.clear();
         }
         span.record("n_logical", n_logical);
         span.record("n_layout", self.layout_lines.len());
         span.record("width", width);
-        self.clamp_state_to_layout_lines();
-    }
-
-    /// Keeps list and selection state valid after layout changes.
-    fn clamp_state_to_layout_lines(&self) {
-        let len = self.layout_lines.len();
-        let mut state = self.state.borrow_mut();
-
-        if len == 0 {
-            state.select(None);
-            *state.offset_mut() = 0;
-            self.selection.clear();
-            return;
-        }
-
-        let max_idx = len - 1;
-        if let Some(selected) = state.selected() {
-            state.select(Some(selected.min(max_idx)));
-        }
-        let offset = state.offset();
-        *state.offset_mut() = offset.min(max_idx);
-
         // Selection stores layout-line indices; clamp or clear if the range
         // changed underneath it.
-        self.selection.clamp_or_clear(len);
+        self.selection.clamp_or_clear(self.layout_lines.len());
     }
 
     /// Counts the number of heading lines at or before the given logical line index.
@@ -538,126 +506,8 @@ impl Preview {
     }
 
     pub fn selected_logical_line(&self) -> Option<usize> {
-        let layout_idx = self.state.borrow().selected()?;
+        let layout_idx = self.viewport.selected()?;
         self.layout_lines.get(layout_idx).map(|l| l.logical_idx)
-    }
-
-    fn selected_layout_line_identity(
-        &self,
-        logical_lines: &[LogicalLine],
-    ) -> Option<LayoutLineIdentity> {
-        let layout_idx = self.state.borrow().selected()?;
-        let layout_lines = self.layout_lines.borrow();
-        let line = layout_lines.get(layout_idx)?;
-
-        match line.code_id(logical_lines) {
-            Some(id) => {
-                let first_logical_idx = layout_lines
-                    .iter()
-                    .find(|line| line.logical(logical_lines).code_id == Some(id))?
-                    .logical_idx;
-                Some(LayoutLineIdentity::Code {
-                    id,
-                    line_idx: line.logical_idx.saturating_sub(first_logical_idx),
-                    wrap_idx: line.wrap_idx,
-                })
-            }
-            None => Some(LayoutLineIdentity::Document {
-                source_position: logical_lines[line.logical_idx].source_position,
-                wrap_idx: line.wrap_idx,
-            }),
-        }
-    }
-
-    fn layout_idx_for_identity(&self, identity: LayoutLineIdentity) -> Option<usize> {
-        match identity {
-            LayoutLineIdentity::Code {
-                id,
-                line_idx,
-                wrap_idx,
-            } => self.layout_idx_for_code_identity(id, line_idx, wrap_idx),
-            LayoutLineIdentity::Document {
-                source_position,
-                wrap_idx,
-            } => self.layout_idx_for_document_identity(source_position, wrap_idx),
-        }
-    }
-
-    fn layout_idx_for_code_identity(
-        &self,
-        id: CodeId,
-        line_idx: usize,
-        wrap_idx: usize,
-    ) -> Option<usize> {
-        let layout_lines = self.layout_lines.borrow();
-        let first_logical_idx = layout_lines
-            .iter()
-            .find(|line| line.logical(&self.logical_lines).code_id == Some(id))?
-            .logical_idx;
-        let logical_idx = first_logical_idx + line_idx;
-
-        layout_lines
-            .iter()
-            .position(|line| line.logical_idx == logical_idx && line.wrap_idx == wrap_idx)
-            .or_else(|| {
-                layout_lines
-                    .iter()
-                    .position(|line| line.logical_idx == logical_idx)
-            })
-    }
-
-    fn layout_idx_for_document_identity(
-        &self,
-        source_position: SourcePosition,
-        wrap_idx: usize,
-    ) -> Option<usize> {
-        self.layout_lines
-            .borrow()
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, layout)| {
-                let candidate = self.logical_lines[layout.logical_idx].source_position;
-                let different_kind = !candidate.same_kind(source_position);
-                let source_distance = candidate.offset().abs_diff(source_position.offset());
-                let different_wrap = layout.wrap_idx != wrap_idx;
-
-                (different_kind, source_distance, different_wrap)
-            })
-            .map(|(index, _)| index)
-    }
-
-    fn layout_extent_for_code(
-        &self,
-        id: CodeId,
-        logical_lines: &[LogicalLine],
-    ) -> Option<(usize, usize)> {
-        let layout_lines = self.layout_lines.borrow();
-        let mut indices = layout_lines
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, line)| (line.code_id(logical_lines) == Some(id)).then_some(idx));
-        let first = indices.next()?;
-        let end = indices.next_back().unwrap_or(first);
-        Some((end, end - first + 1))
-    }
-
-    fn offset_following_grown_code_bottom(
-        &self,
-        offset: usize,
-        id: CodeId,
-        previous_rows: usize,
-    ) -> usize {
-        let viewport = self.layout_lines.last_height();
-        if viewport == 0 {
-            return offset;
-        }
-        let Some((end, rows)) = self.layout_extent_for_code(id, &self.logical_lines) else {
-            return offset;
-        };
-        if rows <= previous_rows || end < offset.saturating_add(viewport) {
-            return offset;
-        }
-        end.saturating_add(1).saturating_sub(viewport)
     }
 
     /// Reserves rows below a code block for an alternate-screen PTY and
@@ -665,11 +515,11 @@ impl Preview {
     pub fn fit_inline_pty_rows(&self, id: CodeId, viewport: usize) -> Option<usize> {
         let (start, end) = self.source_layout_extent(id)?;
         let source_rows = end.saturating_sub(start).saturating_add(1);
-        let offset = self.state.borrow().offset();
+        let offset = self.viewport.offset();
         let (rows, new_offset) = inline_pty_rows(viewport, end, source_rows, offset);
 
         if new_offset != offset {
-            *self.state.borrow_mut().offset_mut() = new_offset;
+            self.viewport.set_offset(new_offset);
         }
         Some(rows)
     }
@@ -735,33 +585,21 @@ impl Preview {
     }
 
     pub fn selected_code_id(&self) -> Option<CodeId> {
-        let selected = self.state.borrow().selected()?;
+        let selected = self.viewport.selected()?;
         self.layout_lines
             .get(selected)?
             .code_id(&self.logical_lines)
-    }
-
-    /// Returns the 0-based row within the preview content area, or `None` if
-    /// the mouse row is outside the content vertical bounds (e.g. on the border).
-    fn mouse_content_rel_row(&self, mouse: &crossterm::event::MouseEvent) -> Option<usize> {
-        let area = self.last_area.get();
-        let content_y = area.y + PREVIEW_CONTENT_TOP_OFFSET;
-        let content_bottom = area.y + area.height.saturating_sub(BORDER_HEIGHT as u16);
-        if mouse.row < content_y || mouse.row >= content_bottom {
-            return None;
-        }
-        Some(mouse.row.saturating_sub(content_y) as usize)
     }
 
     /// Returns the code block owning the layout row under a mouse event.
     ///
     /// Hit-tests by viewport row only. This treats code info, code body, and
     pub fn code_id_at_mouse(&self, mouse: &crossterm::event::MouseEvent) -> Option<CodeId> {
-        if !crate::utils::mouse_in_area(mouse, self.last_area.get()) {
+        if !crate::utils::mouse_in_area(mouse, self.viewport.area()) {
             return None;
         }
-        let rel_row = self.mouse_content_rel_row(mouse)?;
-        let layout_idx = self.state.borrow().offset() + rel_row;
+        let rel_row = self.viewport.rel_row(mouse)?;
+        let layout_idx = self.viewport.offset() + rel_row;
         self.layout_lines
             .get(layout_idx)?
             .code_id(&self.logical_lines)
@@ -788,10 +626,9 @@ impl Preview {
         pty_cols: u16,
         pty_rows: u16,
     ) -> Option<(u16, u16)> {
-        let area = self.last_area.get();
-        let rel_row = self.mouse_content_rel_row(mouse)?;
-        let state_offset = self.state.borrow().offset();
-        let layout_idx = state_offset + rel_row;
+        let area = self.viewport.area();
+        let rel_row = self.viewport.rel_row(mouse)?;
+        let layout_idx = self.viewport.offset() + rel_row;
 
         let block_first = self.layout_lines.find_code_start(id, &self.logical_lines)?;
 
@@ -822,11 +659,6 @@ impl Preview {
         self.code_prefix_overhead.get(&id).copied().unwrap_or(0)
     }
 
-    /// Returns the selected layout-line index, or `0`.
-    fn selected_idx(&self) -> usize {
-        self.state.borrow().selected().unwrap_or(0)
-    }
-
     /// Builds a [`CopyLine`] from a layout line.
     fn copy_line_at(&self, line_idx: usize) -> Option<CopyLine> {
         let line = self.layout_lines.get(line_idx)?;
@@ -835,7 +667,7 @@ impl Preview {
             active_code_id: None,
             prefer_status_gutter: None,
             spinner_char: ' ',
-            viewport_width: self.layout_lines.last_width(),
+            viewport_width: self.viewport.width(),
         };
         let logical_line = &self.logical_lines[line.logical_idx];
         let mut rendered = line.render_plain(logical_line, &ctx);
@@ -876,74 +708,37 @@ impl Preview {
     }
 
     pub fn page_down(&mut self) {
-        let lh = self.layout_lines.last_height();
-        let current = self.selected_idx();
-        let next = (current + lh).min(self.layout_lines.len().saturating_sub(1));
-        self.select_and_scroll_smooth(next);
+        self.viewport.page_by(1, self.layout_lines.len());
     }
 
     pub fn page_up(&mut self) {
-        let lh = self.layout_lines.last_height();
-        let current = self.selected_idx();
-        let next = current.saturating_sub(lh);
-        self.select_and_scroll_smooth(next);
+        self.viewport.page_by(-1, self.layout_lines.len());
     }
 
     pub fn scroll_down(&mut self) {
-        let len = self.layout_lines.len();
-        if len == 0 {
-            let mut state = self.state.borrow_mut();
-            state.select(None);
-            *state.offset_mut() = 0;
-            return;
-        }
-        let mut state = self.state.borrow_mut();
-        let next = (state.offset() + 1).min(len.saturating_sub(1));
-        state.select(Some(next));
-        *state.offset_mut() = next;
+        self.viewport.scroll_by(1, self.layout_lines.len());
     }
 
     pub fn scroll_up(&mut self) {
-        let mut state = self.state.borrow_mut();
-        if self.layout_lines.is_empty() {
-            state.select(None);
-            *state.offset_mut() = 0;
-            return;
-        }
-        let next = state.offset().saturating_sub(1);
-        state.select(Some(next));
-        *state.offset_mut() = next;
+        self.viewport.scroll_by(-1, self.layout_lines.len());
     }
 
     fn select_and_scroll_smooth(&mut self, idx: usize) {
-        let mut state = self.state.borrow_mut();
-        state.select(Some(idx));
-        *state.offset_mut() = idx;
+        self.viewport.goto_code_start(idx);
     }
 
     /// Selects a code block by ID, snapping it to the viewport top unless
     /// enough of the block is already visible to make the selection clear.
     pub fn select_code(&mut self, id: CodeId) {
-        let Some(idx) = self.layout_lines.find_code_start(id, &self.logical_lines) else {
-            self.target_block.set(Some(id));
-            return;
-        };
-
-        if self.has_code_navigation_context(idx) {
-            self.target_block.set(None);
-            self.state.borrow_mut().select(Some(idx));
-        } else {
-            self.target_block.set(Some(id));
-            self.select_and_scroll_smooth(idx);
-        }
+        // Viewport owns the deferred jump target and context check.
+        let idx = self.layout_lines.find_code_start(id, &self.logical_lines);
+        self.viewport.note_code_visible_or_defer(id, idx);
     }
 
     /// Selects an already-visible code block without moving the viewport.
     pub fn select_code_in_place(&mut self, id: CodeId) {
-        self.target_block.set(None);
-        if let Some(idx) = self.layout_lines.find_code_start(id, &self.logical_lines) {
-            self.state.borrow_mut().select(Some(idx));
-        }
+        let idx = self.layout_lines.find_code_start(id, &self.logical_lines);
+        self.viewport.select_in_place(idx);
     }
 
     /// Selects the Nth heading, snapping to it only when off-screen.
@@ -953,12 +748,10 @@ impl Preview {
             if line.heading_level().is_some() {
                 if count == heading_idx {
                     if let Some(layout_idx) = self.layout_idx_of_logical(logical_idx) {
-                        let (offset, height) = {
-                            let state = self.state.borrow();
-                            (state.offset(), self.layout_lines.last_height())
-                        };
+                        let offset = self.viewport.offset();
+                        let height = self.viewport.height();
                         if layout_idx >= offset && layout_idx < offset + height {
-                            self.state.borrow_mut().select(Some(layout_idx));
+                            self.viewport.select(Some(layout_idx));
                         } else {
                             self.select_and_scroll_smooth(layout_idx);
                         }
@@ -968,17 +761,6 @@ impl Preview {
                 count += 1;
             }
         }
-    }
-
-    fn has_code_navigation_context(&self, idx: usize) -> bool {
-        let state = self.state.borrow();
-        let offset = state.offset();
-        let height = self.layout_lines.last_height();
-        let required_rows = CODE_NAVIGATION_CONTEXT_ROWS.min(height);
-
-        height > 0
-            && idx >= offset
-            && idx.saturating_add(required_rows) <= offset.saturating_add(height)
     }
 
     /// Takes the result of the most recent clipboard copy attempt.
@@ -1013,17 +795,17 @@ impl Preview {
             MouseEventKind::ScrollUp => Some(Action::ScrollUp),
             MouseEventKind::ScrollDown => Some(Action::ScrollDown),
             MouseEventKind::Down(MouseButton::Left) => {
-                let area = self.last_area.get();
+                let area = self.viewport.area();
                 // Only process clicks inside the preview area.
                 if !crate::utils::mouse_in_area(&mouse, area) {
                     return None;
                 }
-                let pos = self.mouse_selection_position(area, mouse.row, mouse.column);
+                let pos = self.mouse_selection_position(mouse.row, mouse.column);
                 if let Some((layout_idx, char_idx)) = pos {
                     // Tracks the clicked layout line for selection/menu sync without
                     // moving the viewport. Mouse-wheel scroll uses the viewport
                     // offset, so scroll-after-click continues from the current view.
-                    self.state.borrow_mut().select(Some(layout_idx));
+                    self.viewport.select(Some(layout_idx));
                     let pending_code = self
                         .layout_lines
                         .get(layout_idx)
@@ -1041,15 +823,14 @@ impl Preview {
                     return None;
                 }
                 self.selection.set_pending_code_click(None);
-                let area = self.last_area.get();
-                let content_y = area.y + PREVIEW_CONTENT_TOP_OFFSET;
-                let content_bottom = area.y + area.height.saturating_sub(BORDER_HEIGHT as u16);
-                let clamped_row = mouse.row.clamp(content_y, content_bottom);
-                let clamped_col = mouse.column.clamp(
-                    area.x + PREVIEW_CONTENT_X_OFFSET,
-                    area.x + area.width.saturating_sub(PREVIEW_CONTENT_X_OFFSET),
-                );
-                let pos = self.mouse_selection_position(area, clamped_row, clamped_col);
+                let content = self.viewport.content_rect();
+                let clamped_row = mouse
+                    .row
+                    .clamp(content.y, content.y.saturating_add(content.height));
+                let clamped_col = mouse
+                    .column
+                    .clamp(content.x, content.x.saturating_add(content.width));
+                let pos = self.mouse_selection_position(clamped_row, clamped_col);
                 if let Some((layout_idx, char_idx)) = pos {
                     self.selection.extend(layout_idx, char_idx);
                     Some(Action::Select)
@@ -1058,7 +839,7 @@ impl Preview {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                let area = self.last_area.get();
+                let area = self.viewport.area();
                 // Only process releases inside the preview area.
                 if !crate::utils::mouse_in_area(&mouse, area) {
                     return None;
@@ -1082,75 +863,28 @@ impl Preview {
         }
     }
 
-    fn mouse_selection_position(
-        &self,
-        area: Rect,
-        row: u16,
-        column: u16,
-    ) -> Option<(usize, usize)> {
+    fn mouse_selection_position(&self, row: u16, column: u16) -> Option<(usize, usize)> {
         let layout_lines = self.layout_lines.borrow();
-        let offset = self.state.borrow().offset();
+        let offset = self.viewport.offset();
+        let content = self.viewport.content_rect();
         let ctx = LineRenderContext {
             theme: &self.theme,
             active_code_id: None,
             prefer_status_gutter: None,
             spinner_char: ' ',
-            viewport_width: self.layout_lines.last_width(),
+            viewport_width: self.viewport.width(),
         };
 
-        SelectionState::mouse_to_position(
-            area,
-            row,
-            column,
-            PREVIEW_CONTENT_X_OFFSET,
-            |relative_row| {
-                let layout_idx = offset + relative_row;
-                let layout_line = layout_lines.get(layout_idx)?;
-                let logical_line = layout_line.logical(&self.logical_lines);
-                let rendered_line = logical_line.render_plain(&ctx);
-                Some((
-                    layout_idx,
-                    layout_line.render(logical_line, &rendered_line, &ctx),
-                ))
-            },
-        )
-    }
-}
-
-/// Computes how many PTY rows fit below a block's source lines in the viewport,
-/// returning `(rows, new_offset)`. Scrolls the viewport if fewer than 40% of
-/// the rows (min 8) remain below the source.
-fn inline_pty_rows(
-    viewport: usize,
-    source_end: usize,
-    source_rows: usize,
-    offset: usize,
-) -> (usize, usize) {
-    if viewport == 0 {
-        return (1, offset);
-    }
-
-    let target = ((viewport * INLINE_PTY_MIN_PERCENT).div_ceil(100))
-        .max(INLINE_PTY_MIN_ROWS)
-        .min(viewport)
-        .min(viewport.saturating_sub(source_rows).max(1));
-
-    let available = if source_end < offset {
-        viewport
-    } else {
-        viewport
-            .saturating_sub(source_end.saturating_sub(offset).saturating_add(1))
-            .max(1)
-    };
-
-    if available >= target {
-        (available, offset)
-    } else {
-        let new_offset = source_end
-            .saturating_add(1)
-            .saturating_add(target)
-            .saturating_sub(viewport);
-        (target, new_offset)
+        SelectionState::mouse_to_position(content, row, column, |relative_row| {
+            let layout_idx = offset + relative_row;
+            let layout_line = layout_lines.get(layout_idx)?;
+            let logical_line = layout_line.logical(&self.logical_lines);
+            let rendered_line = logical_line.render_plain(&ctx);
+            Some((
+                layout_idx,
+                layout_line.render(logical_line, &rendered_line, &ctx),
+            ))
+        })
     }
 }
 
@@ -1193,15 +927,12 @@ impl Output for Preview {
     /// frame to pick up spinner changes and active-code styling, but unchanged
     /// text benefits from the [`LogicalLine`](crate::apps::tui::markdown::LogicalLine) cache.
     fn render(&self, frame: &mut Frame, area: Rect) {
-        let height = area.height as usize;
         let width = area.width as usize;
-        self.layout_lines
-            .set_last_height(height.saturating_sub(BORDER_HEIGHT));
-        self.last_area.set(area);
+        self.viewport.set_area(area);
 
         self.request_visible_images();
 
-        if self.layout_lines.last_width() != width && width > 0 {
+        if self.viewport.width() != width && width > 0 {
             self.images.borrow_mut().set_width(self.image_width(width));
             self.rebuild_layout_lines(width);
         }
@@ -1211,12 +942,10 @@ impl Output for Preview {
             return;
         }
 
-        let viewport = height.saturating_sub(BORDER_HEIGHT);
+        let viewport = self.viewport.height();
         let overdraw = viewport / OVERDRAW_FRACTION;
-        let state = self.state.borrow();
-        let original_offset = state.offset();
-        let original_selected = state.selected();
-        drop(state);
+        let original_offset = self.viewport.offset();
+        let original_selected = self.viewport.selected();
 
         let win_start = original_offset.saturating_sub(overdraw);
         let win_end = (original_offset + viewport + overdraw).min(layout_lines.len());
@@ -1227,14 +956,7 @@ impl Output for Preview {
             .get(selected_idx)
             .and_then(|line| line.code_id(&self.logical_lines));
         // Status gutter persists while selected; consumed on navigate-away.
-        let prefer_status_gutter = match self.prefer_status_gutter.get() {
-            Some(id) if active_code_id == Some(id) => Some(id),
-            Some(_) => {
-                self.prefer_status_gutter.set(None);
-                None
-            }
-            None => None,
-        };
+        let prefer_status_gutter = self.viewport.gutter_for(active_code_id);
 
         let ctx = LineRenderContext {
             theme: &self.theme,
@@ -1290,11 +1012,10 @@ impl Output for Preview {
 
         drop(layout_lines);
 
-        let mut render_state = *self.state.borrow();
+        // Throwaway ratatui adapter at the render seam only.
+        let mut render_state = ListState::default();
+        render_state.select(original_selected.map(|sel| sel.saturating_sub(win_start)));
         *render_state.offset_mut() = original_offset.saturating_sub(win_start);
-        if let Some(sel) = original_selected {
-            render_state.select(Some(sel.saturating_sub(win_start)));
-        }
 
         let block = self
             .theme
@@ -1305,7 +1026,7 @@ impl Output for Preview {
 
         frame.render_stateful_widget(List::new(items).block(block), area, &mut render_state);
 
-        self.render_images(frame, area, original_offset, &image_rows);
+        self.render_images(frame, original_offset, &image_rows);
     }
 }
 
@@ -1343,7 +1064,6 @@ impl Preview {
     fn render_images(
         &self,
         frame: &mut Frame,
-        area: Rect,
         original_offset: usize,
         image_rows: &[(usize, i32)],
     ) {
@@ -1351,12 +1071,7 @@ impl Preview {
 
         let images = self.images.borrow();
         let base_dir = &self.image_base_dir;
-        let content_area = Rect::new(
-            area.x + PREVIEW_CONTENT_X_OFFSET,
-            area.y + PREVIEW_CONTENT_TOP_OFFSET,
-            area.width.saturating_sub(PREVIEW_FRAME_OVERHEAD as u16),
-            area.height.saturating_sub(BORDER_HEIGHT as u16),
-        );
+        let content_area = self.viewport.content_rect();
         for (logical_idx, first_global) in image_rows {
             let Some(src) = self.logical_lines[*logical_idx].image_src() else {
                 continue;
@@ -1376,6 +1091,8 @@ impl Preview {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::apps::config::{PREVIEW_CONTENT_TOP_OFFSET, PREVIEW_CONTENT_X_OFFSET};
+    use crate::apps::tui::markdown::SourcePosition;
     use crate::apps::tui::testutil::ansi_line_summary;
     use insta::assert_snapshot;
     use ratatui::text::Line;
@@ -1485,11 +1202,8 @@ mod tests {
             .iter()
             .position(|l| l.logical_idx == logical_idx)
             .expect("paragraph layout line");
-        {
-            let mut state = preview.state.borrow_mut();
-            state.select(Some(layout_idx));
-            *state.offset_mut() = layout_idx;
-        }
+        preview.viewport.select(Some(layout_idx));
+        preview.viewport.set_offset(layout_idx);
 
         for _ in 0..2 {
             preview.toggle_mode();
@@ -1539,11 +1253,8 @@ mod tests {
             .iter()
             .position(|line| line.logical_idx == separator)
             .expect("separator layout line");
-        {
-            let mut state = preview.state.borrow_mut();
-            state.select(Some(layout_idx));
-            *state.offset_mut() = layout_idx;
-        }
+        preview.viewport.select(Some(layout_idx));
+        preview.viewport.set_offset(layout_idx);
 
         for _ in 0..2 {
             preview.toggle_mode();
@@ -1563,7 +1274,10 @@ mod tests {
                 "mode {:?} selected the wrong source boundary",
                 preview.mode.get()
             );
-            assert_eq!(preview.state.borrow().offset(), preview.selected_idx());
+            assert_eq!(
+                preview.viewport.offset(),
+                preview.viewport.selected().unwrap_or(0)
+            );
         }
     }
 
@@ -1583,7 +1297,7 @@ mod tests {
             .iter()
             .position(|line| line.logical_idx == rule_idx)
             .expect("heading rule layout line");
-        preview.state.borrow_mut().select(Some(layout_idx));
+        preview.viewport.select(Some(layout_idx));
 
         preview.toggle_mode();
         preview.rebuild_view(&HashMap::new());
@@ -1647,7 +1361,7 @@ mod tests {
             active_code_id: None,
             prefer_status_gutter: None,
             spinner_char: ' ',
-            viewport_width: preview.layout_lines.last_width(),
+            viewport_width: preview.viewport.width(),
         };
         preview
             .layout_lines
@@ -1831,7 +1545,7 @@ mod tests {
             active_code_id: None,
             prefer_status_gutter: None,
             spinner_char: ' ',
-            viewport_width: preview.layout_lines.last_width(),
+            viewport_width: preview.viewport.width(),
         };
         let rows: Vec<_> = preview
             .layout_lines
@@ -1850,18 +1564,14 @@ mod tests {
         let mut preview = preview_from_markdown("This is a very long paragraph that should wrap into several rows at narrow widths but fit in fewer rows at wider widths.");
         preview.rebuild_layout_lines(20);
         let last_idx = preview.layout_lines.borrow().len().saturating_sub(1);
-        {
-            let mut state = preview.state.borrow_mut();
-            state.select(Some(last_idx));
-            *state.offset_mut() = last_idx;
-        }
+        preview.viewport.select(Some(last_idx));
+        preview.viewport.set_offset(last_idx);
         preview.select_code(2);
         preview.rebuild_layout_lines(120);
 
         let len = preview.layout_lines.borrow().len();
-        let state = preview.state.borrow();
-        assert!(state.selected().is_some_and(|idx| idx < len));
-        assert!(state.offset() < len);
+        assert!(preview.viewport.selected().is_some_and(|idx| idx < len));
+        assert!(preview.viewport.offset() < len);
     }
 
     #[test]
@@ -1873,12 +1583,11 @@ mod tests {
         preview.select_code(2);
         preview.rebuild_layout_lines(80);
 
-        let state = preview.state.borrow();
-        assert!(state.offset() > 0);
+        assert!(preview.viewport.offset() > 0);
         assert_eq!(
             preview
                 .layout_lines
-                .get(state.offset())
+                .get(preview.viewport.offset())
                 .and_then(|line| line.code_id(&preview.logical_lines)),
             Some(2)
         );
@@ -2095,7 +1804,7 @@ mod tests {
     fn test_mouse_to_pty_coords_handles_scroll_above_block_start() {
         let preview = preview_from_markdown("# Intro\n\n```bash\necho first\necho second\n```\n");
         preview.rebuild_layout_lines(80);
-        preview.last_area.set(Rect::new(0, 0, 80, 20));
+        preview.viewport.set_area(Rect::new(0, 0, 80, 20));
 
         // Collect visual indices belonging to code block 1.
         let block_vlines: Vec<usize> = preview
@@ -2111,7 +1820,7 @@ mod tests {
         assert!(block_vlines.len() >= 3, "need at least info + 2 body lines");
 
         // Scroll so block start is one line above viewport.
-        *preview.state.borrow_mut().offset_mut() = block_first + 1;
+        preview.viewport.set_offset(block_first + 1);
         assert!(click_vl > block_first, "click line must be visible");
 
         let rel_row = click_vl - (block_first + 1);
@@ -2140,7 +1849,7 @@ mod tests {
             "# Intro\n\n```bash\necho first\n```\n\n## Details\n\n```bash\necho second\n```\n",
         );
         preview.rebuild_layout_lines(80);
-        preview.last_area.set(Rect::new(0, 0, 80, 20));
+        preview.viewport.set_area(Rect::new(0, 0, 80, 20));
 
         // Find a visual index whose code_id is NOT block 1.
         let outside_vl = preview
@@ -2152,7 +1861,7 @@ mod tests {
             .map(|(idx, _)| idx)
             .expect("should have a non-block-1 visual line");
 
-        let offset = preview.state.borrow().offset();
+        let offset = preview.viewport.offset();
         let rel_row = outside_vl - offset;
         let click_row = rel_row as u16 + PREVIEW_CONTENT_TOP_OFFSET;
         let click_col = PREVIEW_CONTENT_X_OFFSET + 1;
@@ -2194,7 +1903,7 @@ mod tests {
     fn test_click_code_line_selects_code_block_on_release() {
         let preview = preview_from_markdown("```bash\necho hello\n```");
         preview.rebuild_layout_lines(80);
-        preview.last_area.set(Rect::new(0, 0, 80, 10));
+        preview.viewport.set_area(Rect::new(0, 0, 80, 10));
         let row = code_body_layout_idx(&preview) as u16 + PREVIEW_CONTENT_TOP_OFFSET;
         let column = PREVIEW_CONTENT_X_OFFSET + 1;
 
@@ -2220,7 +1929,7 @@ mod tests {
     fn test_drag_code_line_keeps_text_selection() {
         let preview = preview_from_markdown("```bash\necho hello\n```");
         preview.rebuild_layout_lines(80);
-        preview.last_area.set(Rect::new(0, 0, 80, 10));
+        preview.viewport.set_area(Rect::new(0, 0, 80, 10));
         let row = code_body_layout_idx(&preview) as u16 + PREVIEW_CONTENT_TOP_OFFSET;
         let column = PREVIEW_CONTENT_X_OFFSET + 1;
 

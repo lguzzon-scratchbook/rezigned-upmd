@@ -62,6 +62,16 @@ pub const PREVIEW_FRAME_OVERHEAD: usize = 4;
 /// Width of the gutter prepended to code-block lines (`"▎ "`).
 pub const CODE_GUTTER_WIDTH: usize = 2;
 
+/// Minimum share of viewport rows reserved below a block's source lines for
+/// an inline PTY (percent).
+pub const INLINE_PTY_MIN_PERCENT: usize = 40;
+
+/// Floor for the inline PTY row reservation.
+pub const INLINE_PTY_MIN_ROWS: usize = 8;
+
+/// Context rows required below a code block for in-place navigation.
+pub const CODE_NAVIGATION_CONTEXT_ROWS: usize = 3;
+
 /// Vertical-bar glyph used for code-block and blockquote gutters.
 pub const GUTTER_GLYPH: &str = "▎";
 

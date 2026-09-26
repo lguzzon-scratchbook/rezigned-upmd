@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::ops::Range;
 
 use crate::apps::config::{PREVIEW_CODE_WRAP_OVERHEAD, PREVIEW_FRAME_OVERHEAD};
@@ -107,10 +107,12 @@ impl LayoutLine {
 }
 
 /// Terminal-row layout derived from logical lines.
+///
+/// Plain row store; viewport geometry and jump/preserve/follow decisions live
+/// in the owning `Viewport` module (seam between width-dependent rows and
+/// scroll state).
 pub struct LayoutLines {
     lines: RefCell<Vec<LayoutLine>>,
-    last_width: Cell<usize>,
-    last_height: Cell<usize>,
 }
 
 impl Default for LayoutLines {
@@ -123,28 +125,23 @@ impl LayoutLines {
     pub fn new() -> Self {
         Self {
             lines: RefCell::new(vec![]),
-            last_width: Cell::new(crate::apps::config::PTY_DEFAULT_COLS as usize),
-            last_height: Cell::new(0),
         }
     }
 
     /// Rebuilds terminal rows for `width`.
     ///
     /// Wrappable lines use plain rendering for measurement. Images use
-    /// `rows_for`; other unwrappable lines occupy one row. Returns the deferred
-    /// target block's layout index, if any.
+    /// `rows_for`; other unwrappable lines occupy one row.
     pub fn rebuild(
         &self,
         logical_lines: &[LogicalLine],
         width: usize,
         theme: &Theme,
-        target_block: &Cell<Option<CodeId>>,
         rows_for: impl Fn(&LogicalLine) -> usize,
-    ) -> Option<usize> {
+    ) {
         if width == 0 {
-            return None;
+            return;
         }
-        self.last_width.set(width);
         let ctx = LineRenderContext {
             theme,
             active_code_id: None,
@@ -184,11 +181,6 @@ impl LayoutLines {
             new_layout_lines.extend(rows);
         }
         *self.lines.borrow_mut() = new_layout_lines;
-
-        // Apply deferred block jump.
-        target_block
-            .take()
-            .and_then(|id| self.find_code_start(id, logical_lines))
     }
 
     pub fn len(&self) -> usize {
@@ -219,27 +211,14 @@ impl LayoutLines {
             .position(|l| l.logical_idx == logical_idx)
     }
 
-    pub fn find_code_start(&self, id: CodeId, logical_lines: &[LogicalLine]) -> Option<usize> {
+    pub fn find_code_start(
+        &self,
+        id: crate::runner::CodeId,
+        logical_lines: &[LogicalLine],
+    ) -> Option<usize> {
         self.lines.borrow().iter().position(|line| {
             let logical = line.logical(logical_lines);
             logical.code_id == Some(id) && logical.is_code_start
         })
-    }
-
-    pub fn last_width(&self) -> usize {
-        self.last_width.get()
-    }
-
-    #[allow(dead_code)]
-    pub fn set_last_width(&self, width: usize) {
-        self.last_width.set(width);
-    }
-
-    pub fn last_height(&self) -> usize {
-        self.last_height.get()
-    }
-
-    pub fn set_last_height(&self, height: usize) {
-        self.last_height.set(height);
     }
 }
