@@ -16,6 +16,25 @@
 //! index. Final row rendering covers the viewport and its overdraw margin.
 //! Expensive syntax caches are batch-prefetched around the viewport and reused
 //! across unchanged logical rebuilds.
+//!
+//! Navigation map:
+//! - `Preview` state (~84): `logical_lines` (width-independent) + `layout_lines`
+//!   (one entry per terminal row) + `search` + `selection`.
+//! - Full rebuild: `rebuild_view` → `rebuild_view_at_width` (AST → logical via
+//!   `MarkdownRenderer::render`, then layout). Width-only: `resize` →
+//!   `rebuild_layout_lines*` (selection preserved via `LayoutLineIdentity`).
+//! - Render path: `Output::render` → `prefetch_content` (`prepare_lines` batch
+//!   cache) → `LayoutLine::render_*` per visible row + `render_images`.
+//! - Interaction: `Component::update` (scroll/page), `select_code*` /
+//!   `select_heading`, `handle_mouse_event`, `copy_line_at`.
+//! - Search: `search` / `select_search_match` delegate to `search.rs`
+//!   (`PreviewSearch`); match highlight in `markdown.rs::highlight_line_lowered`.
+//! - Selection: `selection.rs` (`PreviewSelection`); mouse mapping via
+//!   `mouse_content_rel_row` / `code_id_at_mouse` / `mouse_to_pty_coords`.
+//! - Line model: `LogicalLine` (content, `tui/markdown.rs`) vs `LayoutLine`
+//!   (row slice, `layout_lines.rs`). Char slicing in `tui/wrap.rs`
+//!   (`wrap_ranges`, `slice_line`, `CopyLine`).
+//! - Entry points: `Preview::new`, `rebuild_view`, `resize`, `render`, `update`.
 
 use ratatui::{
     layout::Rect,

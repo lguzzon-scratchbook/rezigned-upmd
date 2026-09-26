@@ -2,7 +2,41 @@
 //!
 //! Shell quoting utilities live in [`crate::quoting`].
 
-use crate::Kind;
+use anyhow::Result;
+
+use crate::{CodeInput, ExecutionPlan, Kind, LanguageRunner};
+
+/// Shared inline-or-file plan for `-e` runners (Bun, JavaScript).
+///
+/// Single-line code runs inline via `bin -e code`; multiline or import code
+/// writes `script_<id>.<extension>` with cleanup. `extra_args` precede the
+/// inline flag / filename; `apply_options` merges env last.
+pub(crate) fn plan_inline_or_file<'a>(
+    runner: &impl LanguageRunner,
+    code: &CodeInput<'a>,
+    extension: &str,
+    needs_file: bool,
+) -> Result<ExecutionPlan<'a>> {
+    let mut plan = ExecutionPlan::new();
+    if needs_file {
+        let filename = format!("script_{}.{extension}", code.id);
+        let (binary, _) = runner.resolve_binary()?;
+        let mut args = runner.options().extra_args.clone();
+        args.push(filename.clone());
+        plan.requires_file()
+            .file(&filename, code.content)
+            .executable(binary, args)
+            .cleanup(filename);
+    } else {
+        let (binary, _) = runner.resolve_binary()?;
+        let mut args = runner.options().extra_args.clone();
+        args.push("-e".to_string());
+        args.push(code.content.to_string());
+        plan.executable(binary, args);
+    }
+    plan.apply_options(runner.options());
+    Ok(plan)
+}
 
 pub use crate::quoting::{cmd_quote, posix_quote, powershell_quote};
 
