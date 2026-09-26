@@ -564,14 +564,14 @@ impl Preview {
     }
 
     pub fn search(&mut self, term: &str) -> Vec<usize> {
-        self.search.set_term(term);
+        // Content rebuilds refresh the cache via rebuild_texts; term changes
+        // rebuild explicitly here so matches always reads current generation.
+        self.search.set_term(term, &self.logical_lines);
         if term.is_empty() {
             return vec![];
         }
-        // Content rebuilds skip cache work while inactive; rebuild lazily on
-        // first active query after content change.
-        self.search.ensure_texts(&self.logical_lines);
-        self.search.matches(&self.layout_lines.borrow())
+        self.search
+            .matches(&self.layout_lines.borrow(), &self.logical_lines)
     }
 
     pub fn select_search_match(&mut self, idx: usize) -> Option<CodeId> {
