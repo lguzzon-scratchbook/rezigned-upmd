@@ -4,6 +4,25 @@
 //! paragraphs, headings, code rows, and table rows. [`LogicalLine::render`]
 //! applies dynamic styling and caches expensive highlighting. The preview owns
 //! width-dependent wrapping.
+//!
+//! Navigation map:
+//! - `LogicalLine` (~324): width-independent content row; `LogicalLineSource`
+//!   (~219) variants: Text/Markup/CodeBody/Html (lazy `LazyText` + syntax cache),
+//!   CodeInfo/Output/TableRow/Frontmatter/Image/ThematicBreak/Newline.
+//! - Build: `MarkdownRenderer::new` → `mode` → `render` (~1232) dispatches to
+//!   `visual.rs` (Visual) / `markup.rs` (Markup); per-node state in `RenderState`
+//!   (~1156); code rows via `render_code*` (~1252); tables via `render_table`
+//!   (~1000) + `MarkdownTable` (~176) cache; frontmatter via `FrontmatterBlock`.
+//! - Paint: `LogicalLine::render` / `render_plain` (~635) → `render_content`
+//!   (cached) + `apply_prefixes`/`add_gutter`; batch prefetch via `prepare_lines`
+//!   / `prepare_syntax_batch` (~856); search highlight via
+//!   `highlight_line_lowered` (~1439).
+//! - Not here: `LayoutLine` row slices live in `preview/layout_lines.rs`;
+//!   char slicing in `tui/wrap.rs` (`wrap_ranges`, `slice_line`); search state in
+//!   `preview/search.rs` (`PreviewSearch`); text selection in
+//!   `preview/selection.rs` (`PreviewSelection`).
+//! - Entry points: `MarkdownRenderer::render`, `LogicalLine::render`,
+//!   `LogicalLine::render_plain`, `prepare_lines`, `highlight_line_lowered`.
 
 mod markup;
 mod visual;

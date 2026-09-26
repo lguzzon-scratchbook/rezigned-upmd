@@ -106,7 +106,7 @@ mod tests {
     use ratatui::style::Style;
 
     fn wrap_line(line: Line<'static>, max_width: usize) -> Vec<(Line<'static>, usize, usize)> {
-        let total_len = line.to_string().chars().count();
+        let total_len = line_char_count(&line);
         wrap_ranges(&line, max_width)
             .into_iter()
             .map(|range| {

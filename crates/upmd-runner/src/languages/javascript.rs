@@ -7,29 +7,7 @@ use crate::{CodeInput, ExecutionPlan, LanguageRunner};
 
 impl LanguageRunner for JavaScript {
     fn plan<'a>(&self, code: &CodeInput<'a>) -> Result<ExecutionPlan<'a>> {
-        let mut plan = ExecutionPlan::new();
-
-        // Multi-line code or imports/requires need a file; single-line runs inline via -e.
-        if self.needs_file_execution(code) {
-            let filename = format!("script_{}.js", code.id);
-
-            let (binary, _) = self.resolve_binary()?;
-            let mut args = self.options().extra_args.clone();
-            args.push(filename.clone());
-            plan.requires_file()
-                .file(&filename, code.content)
-                .executable(binary, args)
-                .cleanup(filename);
-        } else {
-            let (binary, _) = self.resolve_binary()?;
-            let mut args = self.options().extra_args.clone();
-            args.push("-e".to_string());
-            args.push(code.content.to_string());
-            plan.executable(binary, args);
-        }
-
-        plan.apply_options(self.options());
-        Ok(plan)
+        super::plan_inline_or_file(self, code, "js", self.needs_file_execution(code))
     }
 
     fn options(&self) -> &crate::RunnerOptions {
