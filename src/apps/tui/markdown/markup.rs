@@ -324,6 +324,7 @@ mod tests {
                         line.is_code_start,
                         line.is_running,
                         line.gutter_fg,
+                        line.gutter_width.get(),
                     )
                 })
                 .collect::<Vec<_>>()

@@ -46,8 +46,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use crate::apps::config::{
-    CODE_GUTTER_WIDTH, GUTTER_GLYPH, INLINE_MAX_LINES_DEFAULT, INLINE_MAX_LINES_FRACTION,
-    INLINE_MAX_LINES_MIN, OVERDRAW_FRACTION, PREVIEW_CONTENT_X_OFFSET, PREVIEW_FRAME_OVERHEAD,
+    INLINE_MAX_LINES_DEFAULT, INLINE_MAX_LINES_FRACTION, INLINE_MAX_LINES_MIN, OVERDRAW_FRACTION,
+    PREVIEW_CONTENT_X_OFFSET, PREVIEW_FRAME_OVERHEAD,
 };
 use crate::apps::theme::Theme;
 use crate::runner::CodeId;
@@ -674,30 +674,32 @@ impl Preview {
         };
         let logical_line = &self.logical_lines[line.logical_idx];
         let mut rendered = line.render_plain(logical_line, &ctx);
-        let display_prefix_len = match (logical_line.has_code_gutter(), line.is_continuation()) {
-            (false, _) => 0,
-            (true, true) => CODE_GUTTER_WIDTH,
-            (true, false) => {
-                let gutter_idx = logical_line.prefixes.len();
-                if rendered
-                    .spans
-                    .get(gutter_idx)
-                    .is_some_and(|span| span.content == GUTTER_GLYPH)
-                {
+        // Gutter seam: width field is authoritative; strip that many display
+        // columns instead of glyph-matching spans.
+        let display_prefix_len = logical_line.gutter_width.get();
+        if display_prefix_len > 0 && !line.is_continuation() {
+            let gutter_idx = logical_line.prefixes.len();
+            let mut remaining = display_prefix_len;
+            while remaining > 0 && gutter_idx < rendered.spans.len() {
+                let span_chars: usize = rendered.spans[gutter_idx].content.chars().count();
+                if span_chars == 0 {
                     rendered.spans.remove(gutter_idx);
-                    if rendered
-                        .spans
-                        .get(gutter_idx)
-                        .is_some_and(|span| span.content == " ")
-                    {
-                        rendered.spans.remove(gutter_idx);
-                    }
-                    CODE_GUTTER_WIDTH
+                    continue;
+                }
+                if span_chars <= remaining {
+                    remaining -= span_chars;
+                    rendered.spans.remove(gutter_idx);
                 } else {
-                    0
+                    let rest: String = rendered.spans[gutter_idx]
+                        .content
+                        .chars()
+                        .skip(remaining)
+                        .collect();
+                    rendered.spans[gutter_idx].content = rest.into();
+                    remaining = 0;
                 }
             }
-        };
+        }
         let text = rendered
             .spans
             .iter()

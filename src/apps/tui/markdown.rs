@@ -29,13 +29,13 @@ mod visual;
 
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 use unicode_width::UnicodeWidthChar;
 
-use crate::apps::config::{GUTTER_GLYPH, PREVIEW_FRAME_OVERHEAD};
+use crate::apps::config::{CODE_GUTTER_WIDTH, GUTTER_GLYPH, PREVIEW_FRAME_OVERHEAD};
 use crate::apps::theme::Theme;
 use crate::runner::CodeId;
 use upmd_parser::nodes::{
@@ -407,6 +407,13 @@ pub struct LogicalLine {
     /// Number of leading rendered characters repeated on wrapped rows, such as
     /// `▎ ` in Visual mode or `> ` in Markup mode.
     wrap_prefix_width: usize,
+    /// Display width reserved for the code gutter (`"▎ "`).
+    ///
+    /// First-class module state for the gutter seam: paint, wrap measurement,
+    /// and copy all leverage this one number instead of re-deriving it from
+    /// line kind at each use-site depth. Zero for non-code lines. `Cell` lets
+    /// paint (`apply_gutter`) write the seam through shared refs.
+    pub gutter_width: Cell<usize>,
     /// Styled prefix painted on continuation rows when it differs from the
     /// leading rendered text, such as spaces replacing a list marker.
     wrap_prefixes: Option<Vec<Span<'static>>>,
@@ -504,6 +511,9 @@ impl LogicalLine {
             is_block_start: is_start,
             is_code_start: is_start,
             is_running,
+            // Module seam: gutter width written once at build depth so paint,
+            // wrap measurement, and copy leverage the field with locality.
+            gutter_width: Cell::new(CODE_GUTTER_WIDTH),
             ..Self::default()
         }
     }
@@ -516,6 +526,7 @@ impl LogicalLine {
                 kind: TextKind::CodeBody,
             },
             code_id: Some(code_id),
+            gutter_width: Cell::new(CODE_GUTTER_WIDTH),
             ..Self::default()
         }
     }
@@ -525,6 +536,7 @@ impl LogicalLine {
         Self {
             source: LogicalLineSource::Output(content.into()),
             code_id: Some(code_id),
+            gutter_width: Cell::new(CODE_GUTTER_WIDTH),
             ..Self::default()
         }
     }
@@ -689,7 +701,35 @@ impl LogicalLine {
 
     #[inline]
     pub fn has_code_gutter(&self) -> bool {
-        self.is_code_info() || self.is_code_body() || self.is_output()
+        // Module seam: field is authoritative; kind check lives only in
+        // constructors at build depth, consumers leverage locality here.
+        self.gutter_width.get() > 0
+    }
+
+    /// Style resolver for the gutter seam; paint paths leverage this instead
+    /// of calling the free `gutter_style` adapter directly.
+    pub fn resolve_gutter_style(
+        &self,
+        bg: Option<Color>,
+        is_unwrappable: bool,
+        is_active: bool,
+        theme: &Theme,
+        prefer_status_gutter: bool,
+    ) -> Style {
+        gutter_style(
+            bg,
+            is_unwrappable,
+            is_active,
+            theme,
+            self.gutter_fg,
+            prefer_status_gutter,
+            self.is_running,
+        )
+    }
+
+    /// Width-dependent wrap overhead (frame + gutter) for this line.
+    pub fn wrap_overhead(&self) -> usize {
+        PREVIEW_FRAME_OVERHEAD + self.gutter_width.get()
     }
 
     #[inline]
@@ -932,7 +972,7 @@ impl LogicalLine {
     ) -> Line<'static> {
         let wrap_width = ctx
             .viewport_width
-            .saturating_sub(crate::apps::config::PREVIEW_CODE_WRAP_OVERHEAD + self.prefix_width())
+            .saturating_sub(self.wrap_overhead() + self.prefix_width())
             .max(1);
         let mut spans: Vec<Span<'static>> = left
             .iter()
@@ -960,12 +1000,11 @@ impl LogicalLine {
         }
         apply_gutter(
             line,
+            self,
             self.is_output(),
             is_active,
             ctx.theme,
-            self.gutter_fg,
             ctx.prefer_status_gutter == self.code_id,
-            self.is_running,
         );
     }
 }
@@ -1069,23 +1108,25 @@ fn prepare_syntax_batch(batch: &[LogicalLine], ctx: &LineRenderContext<'_>) -> u
 }
 
 /// Prepends gutter "▎". Priority: running > active > status > inactive.
+///
+/// Writes the first-class gutter seam on the owning line: width plus the
+/// resolved style inputs already stored there. Paint, wrap measurement, and
+/// copy then consume the field uniformly.
 pub fn apply_gutter(
     line: &mut Line<'static>,
+    logical: &LogicalLine,
     is_unwrappable: bool,
     is_active: bool,
     theme: &Theme,
-    gutter_fg: Option<Color>,
     prefer_status_gutter: bool,
-    is_running: bool,
 ) {
-    let gs = gutter_style(
+    logical.gutter_width.set(CODE_GUTTER_WIDTH);
+    let gs = logical.resolve_gutter_style(
         line.style.bg,
         is_unwrappable,
         is_active,
         theme,
-        gutter_fg,
         prefer_status_gutter,
-        is_running,
     );
     let gutter = Span::styled(GUTTER_GLYPH, gs);
     let has_content = !line.spans.is_empty();
@@ -1933,37 +1974,26 @@ mod tests {
     fn test_apply_gutter_prefers_active_color_without_prefer_status_gutter() {
         let theme = test_theme();
         let mut line = Line::from("done");
+        let mut logical = LogicalLine::code_body("done", "bash", 1);
+        logical.gutter_fg = Some(theme.success);
 
-        apply_gutter(
-            &mut line,
-            false,
-            true,
-            &theme,
-            Some(theme.success),
-            false,
-            false,
-        );
+        apply_gutter(&mut line, &logical, false, true, &theme, false);
 
         assert_eq!(
             line.spans.first().and_then(|span| span.style.fg),
             Some(theme.active)
         );
+        assert_eq!(logical.gutter_width.get(), CODE_GUTTER_WIDTH);
     }
 
     #[test]
     fn test_apply_gutter_prefers_status_color_with_prefer_status_gutter() {
         let theme = test_theme();
         let mut line = Line::from("done");
+        let mut logical = LogicalLine::code_body("done", "bash", 1);
+        logical.gutter_fg = Some(theme.success);
 
-        apply_gutter(
-            &mut line,
-            false,
-            true,
-            &theme,
-            Some(theme.success),
-            true,
-            false,
-        );
+        apply_gutter(&mut line, &logical, false, true, &theme, true);
 
         assert_eq!(
             line.spans.first().and_then(|span| span.style.fg),

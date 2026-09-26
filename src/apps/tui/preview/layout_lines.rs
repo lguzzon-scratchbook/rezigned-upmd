@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::ops::Range;
 
-use crate::apps::config::{PREVIEW_CODE_WRAP_OVERHEAD, PREVIEW_FRAME_OVERHEAD};
 use crate::apps::theme::Theme;
 use crate::runner::CodeId;
 
@@ -74,14 +73,15 @@ impl LayoutLine {
             slice_line(rendered_line, self.char_range.clone())
         };
         if logical_line.has_code_gutter() && self.is_continuation() {
+            // Gutter seam: consume width + style resolver from the logical
+            // line interface instead of guessing running status from color.
             apply_gutter(
                 &mut line,
+                logical_line,
                 logical_line.is_unwrappable(),
                 ctx.active_code_id == logical_line.code_id,
                 ctx.theme,
-                logical_line.gutter_fg,
                 ctx.prefer_status_gutter == logical_line.code_id,
-                logical_line.gutter_fg == Some(ctx.theme.warning),
             );
         }
         self.prepend_wrap_prefix(logical_line, rendered_line, &mut line);
@@ -166,13 +166,10 @@ impl LayoutLines {
                 continue;
             }
 
-            let overhead = if logical_line.has_code_gutter() {
-                PREVIEW_CODE_WRAP_OVERHEAD
-            } else {
-                PREVIEW_FRAME_OVERHEAD
-            };
+            // Gutter seam: single wrap-overhead encoding on the logical line
+            // interface; no second PREVIEW_CODE vs PREVIEW_FRAME branch here.
             let wrap_width = width
-                .saturating_sub(overhead + logical_line.reserved_prefix_width())
+                .saturating_sub(logical_line.wrap_overhead() + logical_line.reserved_prefix_width())
                 .max(1);
             let rows = wrap_ranges(&line, wrap_width)
                 .into_iter()
