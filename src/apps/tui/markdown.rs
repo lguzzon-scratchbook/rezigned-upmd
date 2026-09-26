@@ -7,7 +7,7 @@
 //!
 //! Navigation map:
 //! - `LogicalLine` (~324): width-independent content row; `LogicalLineSource`
-//!   (~219) variants: Text/Markup/CodeBody/Html (lazy `LazyText` + syntax cache),
+//!   (~219) variants: Text (lazy `LazyText` + `TextKind` syntax cache),
 //!   CodeInfo/Output/TableRow/Frontmatter/Image/ThematicBreak/Newline.
 //! - Build: `MarkdownRenderer::new` → `mode` → `render` (~1232) dispatches to
 //!   `visual.rs` (Visual) / `markup.rs` (Markup); per-node state in `RenderState`
@@ -231,28 +231,58 @@ impl MarkdownTable {
     }
 }
 
+/// Single seam for the module's lazy-text interface; `kind` recovers the old
+/// discriminant at its use-site depth, leveraging locality instead of new adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextKind {
+    /// Plain paragraph or inline text with semantic spans.
+    #[default]
+    Paragraph,
+    /// Raw Markdown source, syntax-highlighted in batches.
+    Markup,
+    /// List item with semantic spans and a styled prefix.
+    ListItem,
+    /// Heading with semantic spans and a level for rules and navigation.
+    Heading { level: u8 },
+    /// One row of a raw HTML block.
+    Html,
+    /// One raw code body row; highlight language lives on [`LazyText`].
+    CodeBody,
+}
+impl TextKind {
+    /// Returns true for raw source rendered by a syntax highlighter.
+    fn is_syntax_source(self) -> bool {
+        matches!(self, Self::Markup | Self::Html | Self::CodeBody)
+    }
+    /// Short snapshot label for the text discriminant.
+    #[cfg(test)]
+    pub fn label(self) -> String {
+        match self {
+            Self::Paragraph => "Text".to_string(),
+            Self::Markup => "Markup".to_string(),
+            Self::ListItem => "ListItem".to_string(),
+            Self::Heading { level } => format!("Heading({level})"),
+            Self::Html => "Html".to_string(),
+            Self::CodeBody => "CodeBody".to_string(),
+        }
+    }
+}
 /// Content specific to one logical line.
 ///
 /// Shared navigation and display metadata lives on [`LogicalLine`].
 #[derive(Debug, Clone, Default)]
 pub enum LogicalLineSource {
-    Text(LazyText),
-    /// Raw Markdown source prepared in viewport-sized syntax-highlighted batches.
-    Markup(LazyText),
-    ListItem(LazyText),
-    Heading {
-        level: u8,
-        text: LazyText,
+    /// All lazy-text lines share one payload; `kind` recovers the old discriminant.
+    Text {
+        lazy: LazyText,
+        kind: TextKind,
     },
     CodeInfo {
         left: Vec<(String, Style)>,
         right: String,
         style: Style,
     },
-    CodeBody(LazyText),
     Output(Text<'static>),
-    /// One row of a raw HTML block.
-    Html(LazyText),
     Frontmatter {
         block: Rc<FrontmatterBlock>,
         row_idx: usize,
@@ -274,35 +304,57 @@ pub enum LogicalLineSource {
     #[default]
     Newline,
 }
-
 impl LogicalLineSource {
     fn lazy_text_mut(&mut self) -> Option<&mut LazyText> {
         match self {
-            LogicalLineSource::Text(text)
-            | LogicalLineSource::Markup(text)
-            | LogicalLineSource::Html(text)
-            | LogicalLineSource::ListItem(text)
-            | LogicalLineSource::CodeBody(text)
-            | LogicalLineSource::Heading { text, .. } => Some(text),
-            _ => None,
+            Self::Text { lazy, .. } => Some(lazy),
+            Self::CodeInfo { .. }
+            | Self::Output(_)
+            | Self::Frontmatter { .. }
+            | Self::TableRow { .. }
+            | Self::Image { .. }
+            | Self::ThematicBreak
+            | Self::Newline => None,
         }
     }
-
     fn lazy_text(&self) -> Option<&LazyText> {
         match self {
-            LogicalLineSource::Text(text)
-            | LogicalLineSource::Markup(text)
-            | LogicalLineSource::Html(text)
-            | LogicalLineSource::ListItem(text)
-            | LogicalLineSource::CodeBody(text)
-            | LogicalLineSource::Heading { text, .. } => Some(text),
-            _ => None,
+            Self::Text { lazy, .. } => Some(lazy),
+            Self::CodeInfo { .. }
+            | Self::Output(_)
+            | Self::Frontmatter { .. }
+            | Self::TableRow { .. }
+            | Self::Image { .. }
+            | Self::ThematicBreak
+            | Self::Newline => None,
         }
     }
-
     /// Returns true for raw source rendered by a syntax highlighter.
     fn is_syntax_source(&self) -> bool {
-        matches!(self, Self::Markup(_) | Self::Html(_) | Self::CodeBody(_))
+        match self {
+            Self::Text { kind, .. } => kind.is_syntax_source(),
+            Self::CodeInfo { .. }
+            | Self::Output(_)
+            | Self::Frontmatter { .. }
+            | Self::TableRow { .. }
+            | Self::Image { .. }
+            | Self::ThematicBreak
+            | Self::Newline => false,
+        }
+    }
+    /// Short snapshot label for every source variant.
+    #[cfg(test)]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Text { kind, .. } => kind.label(),
+            Self::CodeInfo { .. } => "CodeInfo".to_string(),
+            Self::Output(_) => "Output".to_string(),
+            Self::Frontmatter { .. } => "Frontmatter".to_string(),
+            Self::TableRow { .. } => "Table".to_string(),
+            Self::Image { .. } => "Image".to_string(),
+            Self::ThematicBreak => "ThematicBreak".to_string(),
+            Self::Newline => "Newline".to_string(),
+        }
     }
 }
 
@@ -382,7 +434,10 @@ impl LogicalLine {
     /// Creates a text line from inline markdown spans.
     pub fn text_lazy_spans(spans: Vec<InlineSpan>, source: &str, is_block_start: bool) -> Self {
         Self {
-            source: LogicalLineSource::Text(LazyText::from_spans(spans, source)),
+            source: LogicalLineSource::Text {
+                lazy: LazyText::from_spans(spans, source),
+                kind: TextKind::Paragraph,
+            },
             is_block_start,
             ..Self::default()
         }
@@ -397,7 +452,10 @@ impl LogicalLine {
         is_block_start: bool,
     ) -> Self {
         Self {
-            source: LogicalLineSource::ListItem(LazyText::from_spans(spans, source)),
+            source: LogicalLineSource::Text {
+                lazy: LazyText::from_spans(spans, source),
+                kind: TextKind::ListItem,
+            },
             is_block_start,
             prefixes: vec![prefix],
             wrap_prefixes: Some(vec![wrap_prefix]),
@@ -408,9 +466,9 @@ impl LogicalLine {
     /// Creates a heading line from inline markdown spans.
     pub fn heading_lazy_spans(spans: Vec<InlineSpan>, source: &str, level: u8) -> Self {
         Self {
-            source: LogicalLineSource::Heading {
-                level,
-                text: LazyText::from_spans(spans, source),
+            source: LogicalLineSource::Text {
+                lazy: LazyText::from_spans(spans, source),
+                kind: TextKind::Heading { level },
             },
             is_block_start: true,
             ..Self::default()
@@ -422,7 +480,10 @@ impl LogicalLine {
         let text = text.into();
         Self {
             wrap_prefix_width: source_quote_width(&text),
-            source: LogicalLineSource::Markup(LazyText::markdown(text)),
+            source: LogicalLineSource::Text {
+                lazy: LazyText::markdown(text),
+                kind: TextKind::Markup,
+            },
             is_block_start,
             ..Self::default()
         }
@@ -450,7 +511,10 @@ impl LogicalLine {
     /// Creates a code body line with raw content that needs lazy highlighting.
     pub fn code_body(raw: impl Into<String>, language: impl Into<String>, code_id: CodeId) -> Self {
         Self {
-            source: LogicalLineSource::CodeBody(LazyText::new(raw, language)),
+            source: LogicalLineSource::Text {
+                lazy: LazyText::new(raw, language),
+                kind: TextKind::CodeBody,
+            },
             code_id: Some(code_id),
             ..Self::default()
         }
@@ -468,7 +532,10 @@ impl LogicalLine {
     /// Creates one row of a raw HTML block.
     pub fn html(text: impl Into<String>, is_block_start: bool) -> Self {
         Self {
-            source: LogicalLineSource::Html(LazyText::new(text, "html")),
+            source: LogicalLineSource::Text {
+                lazy: LazyText::new(text, "html"),
+                kind: TextKind::Html,
+            },
             is_block_start,
             ..Self::default()
         }
@@ -515,7 +582,7 @@ impl LogicalLine {
         self.source.lazy_text_mut()
     }
 
-    fn lazy_text(&self) -> Option<&LazyText> {
+    pub(crate) fn lazy_text(&self) -> Option<&LazyText> {
         self.source.lazy_text()
     }
 
@@ -524,11 +591,12 @@ impl LogicalLine {
         match &self.source {
             LogicalLineSource::TableRow { table, .. } => table.clear_cache(),
             LogicalLineSource::Frontmatter { block, .. } => block.clear_cache(),
-            _ => {
-                if let Some(text) = self.lazy_text() {
-                    *text.cached.borrow_mut() = None;
-                }
-            }
+            LogicalLineSource::Text { lazy, .. } => *lazy.cached.borrow_mut() = None,
+            LogicalLineSource::CodeInfo { .. }
+            | LogicalLineSource::Output(_)
+            | LogicalLineSource::Image { .. }
+            | LogicalLineSource::ThematicBreak
+            | LogicalLineSource::Newline => {}
         }
     }
 
@@ -554,11 +622,45 @@ impl LogicalLine {
     #[inline]
     pub fn heading_level(&self) -> Option<u8> {
         match self.source {
-            LogicalLineSource::Heading { level, .. } => Some(level),
-            _ => None,
+            LogicalLineSource::Text {
+                kind: TextKind::Heading { level },
+                ..
+            } => Some(level),
+            LogicalLineSource::Text { .. }
+            | LogicalLineSource::CodeInfo { .. }
+            | LogicalLineSource::Output(_)
+            | LogicalLineSource::Frontmatter { .. }
+            | LogicalLineSource::TableRow { .. }
+            | LogicalLineSource::Image { .. }
+            | LogicalLineSource::ThematicBreak
+            | LogicalLineSource::Newline => None,
         }
     }
 
+    #[inline]
+    #[cfg(test)]
+    pub fn text_kind(&self) -> Option<TextKind> {
+        match self.source {
+            LogicalLineSource::Text { kind, .. } => Some(kind),
+            LogicalLineSource::CodeInfo { .. }
+            | LogicalLineSource::Output(_)
+            | LogicalLineSource::Frontmatter { .. }
+            | LogicalLineSource::TableRow { .. }
+            | LogicalLineSource::Image { .. }
+            | LogicalLineSource::ThematicBreak
+            | LogicalLineSource::Newline => None,
+        }
+    }
+    #[inline]
+    pub fn is_markup(&self) -> bool {
+        matches!(
+            self.source,
+            LogicalLineSource::Text {
+                kind: TextKind::Markup,
+                ..
+            }
+        )
+    }
     #[inline]
     pub fn is_code_info(&self) -> bool {
         matches!(self.source, LogicalLineSource::CodeInfo { .. })
@@ -566,7 +668,13 @@ impl LogicalLine {
 
     #[inline]
     pub fn is_code_body(&self) -> bool {
-        matches!(self.source, LogicalLineSource::CodeBody(_))
+        matches!(
+            self.source,
+            LogicalLineSource::Text {
+                kind: TextKind::CodeBody,
+                ..
+            }
+        )
     }
 
     #[inline]
@@ -581,12 +689,7 @@ impl LogicalLine {
 
     #[inline]
     pub fn has_code_gutter(&self) -> bool {
-        matches!(
-            self.source,
-            LogicalLineSource::CodeInfo { .. }
-                | LogicalLineSource::CodeBody(_)
-                | LogicalLineSource::Output(_)
-        )
+        self.is_code_info() || self.is_code_body() || self.is_output()
     }
 
     #[inline]
@@ -603,7 +706,13 @@ impl LogicalLine {
     pub fn image_src(&self) -> Option<&str> {
         match &self.source {
             LogicalLineSource::Image { src, .. } => Some(src),
-            _ => None,
+            LogicalLineSource::Text { .. }
+            | LogicalLineSource::CodeInfo { .. }
+            | LogicalLineSource::Output(_)
+            | LogicalLineSource::Frontmatter { .. }
+            | LogicalLineSource::TableRow { .. }
+            | LogicalLineSource::ThematicBreak
+            | LogicalLineSource::Newline => None,
         }
     }
 
@@ -620,12 +729,7 @@ impl LogicalLine {
     /// Returns text content, preferring raw text if available.
     pub fn text_content(&self) -> String {
         match &self.source {
-            LogicalLineSource::Text(text)
-            | LogicalLineSource::Markup(text)
-            | LogicalLineSource::Html(text)
-            | LogicalLineSource::ListItem(text)
-            | LogicalLineSource::CodeBody(text)
-            | LogicalLineSource::Heading { text, .. } => text.text.clone(),
+            LogicalLineSource::Text { lazy, .. } => lazy.text.clone(),
             LogicalLineSource::CodeInfo { left, right, .. } => {
                 let left: String = left.iter().map(|(text, _)| text.as_str()).collect();
                 format!("{left} {}", right.trim_end())
@@ -676,8 +780,18 @@ impl LogicalLine {
             ctx.theme.highlight(&text.text, &text.language)
         } else {
             let line = match &self.source {
-                LogicalLineSource::Heading { .. } => render_heading_spans(&text.spans, ctx.theme),
-                _ => {
+                LogicalLineSource::Text {
+                    kind: TextKind::Heading { .. },
+                    ..
+                } => render_heading_spans(&text.spans, ctx.theme),
+                LogicalLineSource::Text { .. }
+                | LogicalLineSource::CodeInfo { .. }
+                | LogicalLineSource::Output(_)
+                | LogicalLineSource::Frontmatter { .. }
+                | LogicalLineSource::TableRow { .. }
+                | LogicalLineSource::Image { .. }
+                | LogicalLineSource::ThematicBreak
+                | LogicalLineSource::Newline => {
                     render_inline_spans(&text.spans, "", ctx.theme.markdown_text_style(), ctx.theme)
                 }
             };
@@ -784,19 +898,14 @@ impl LogicalLine {
     /// Renders the main line content, caching semantic Markdown or syntax-highlighted code.
     fn render_content(&self, ctx: &LineRenderContext<'_>) -> Line<'static> {
         match &self.source {
-            LogicalLineSource::Text(text)
-            | LogicalLineSource::Markup(text)
-            | LogicalLineSource::Html(text)
-            | LogicalLineSource::ListItem(text)
-            | LogicalLineSource::CodeBody(text)
-            | LogicalLineSource::Heading { text, .. } => {
+            LogicalLineSource::Text { lazy, .. } => {
                 self.ensure_content_cached(ctx);
-                let cache = text.cached.borrow();
+                let cache = lazy.cached.borrow();
                 cache
                     .as_ref()
                     .and_then(|cached| cached.lines.first())
                     .cloned()
-                    .unwrap_or_else(|| expand_tabs_in_line(Line::raw(text.text.clone())))
+                    .unwrap_or_else(|| expand_tabs_in_line(Line::raw(lazy.text.clone())))
             }
             LogicalLineSource::Frontmatter { block, row_idx } => block.line(*row_idx, ctx.theme),
             LogicalLineSource::CodeInfo { left, right, style } => {
@@ -864,10 +973,15 @@ impl LogicalLine {
 /// Returns line text eligible for batched syntax highlighting.
 fn batch_text(line: &LogicalLine) -> Option<&LazyText> {
     match &line.source {
-        LogicalLineSource::Markup(text)
-        | LogicalLineSource::Html(text)
-        | LogicalLineSource::CodeBody(text) => Some(text),
-        _ => None,
+        LogicalLineSource::Text { lazy, kind } if kind.is_syntax_source() => Some(lazy),
+        LogicalLineSource::Text { .. }
+        | LogicalLineSource::CodeInfo { .. }
+        | LogicalLineSource::Output(_)
+        | LogicalLineSource::Frontmatter { .. }
+        | LogicalLineSource::TableRow { .. }
+        | LogicalLineSource::Image { .. }
+        | LogicalLineSource::ThematicBreak
+        | LogicalLineSource::Newline => None,
     }
 }
 
@@ -1776,21 +1890,7 @@ mod tests {
     }
 
     fn source_label(line: &LogicalLine) -> String {
-        match &line.source {
-            LogicalLineSource::Text(_) => "Text".to_string(),
-            LogicalLineSource::Markup(_) => "Markup".to_string(),
-            LogicalLineSource::ListItem(_) => "ListItem".to_string(),
-            LogicalLineSource::Heading { level, .. } => format!("Heading({level})"),
-            LogicalLineSource::CodeInfo { .. } => "CodeInfo".to_string(),
-            LogicalLineSource::CodeBody(_) => "CodeBody".to_string(),
-            LogicalLineSource::Output(_) => "Output".to_string(),
-            LogicalLineSource::Html(_) => "Html".to_string(),
-            LogicalLineSource::Frontmatter { .. } => "Frontmatter".to_string(),
-            LogicalLineSource::TableRow { .. } => "Table".to_string(),
-            LogicalLineSource::Image { .. } => "Image".to_string(),
-            LogicalLineSource::ThematicBreak => "ThematicBreak".to_string(),
-            LogicalLineSource::Newline => "Newline".to_string(),
-        }
+        line.source.label()
     }
 
     fn logical_line_summary(lines: &[LogicalLine]) -> String {

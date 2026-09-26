@@ -56,8 +56,8 @@ use upmd_parser::nodes::Node;
 use upmd_parser::{Codes, Document};
 
 use super::markdown::{
-    highlight_line_lowered, prepare_lines, LineRenderContext, LogicalLine, LogicalLineSource,
-    MarkdownRenderer, RenderMode,
+    highlight_line_lowered, prepare_lines, LineRenderContext, LogicalLine, MarkdownRenderer,
+    RenderMode,
 };
 use super::selection::SelectionState;
 use super::wrap::{line_char_count, CopyLine};
@@ -312,12 +312,12 @@ impl Preview {
         }
 
         for line in &mut self.logical_lines {
-            if let LogicalLineSource::Markup(text) = &mut line.source {
-                if let Some(cached) = self
-                    .markup_line_cache
-                    .remove(&line.source_position.offset())
-                {
-                    *text.cached.get_mut() = Some(cached);
+            if line.is_markup() {
+                let offset = line.source_position.offset();
+                if let Some(cached) = self.markup_line_cache.remove(&offset) {
+                    if let Some(text) = line.lazy_text_mut() {
+                        *text.cached.get_mut() = Some(cached);
+                    }
                 }
                 continue;
             }
@@ -352,7 +352,10 @@ impl Preview {
 
     fn retain_markup_caches(&mut self, lines: &mut [LogicalLine]) {
         for line in lines {
-            let LogicalLineSource::Markup(text) = &mut line.source else {
+            if !line.is_markup() {
+                continue;
+            }
+            let Some(text) = line.lazy_text_mut() else {
                 continue;
             };
             if let Some(cached) = text.cached.get_mut().take() {
@@ -1093,6 +1096,7 @@ mod tests {
     use super::*;
     use crate::apps::config::{PREVIEW_CONTENT_TOP_OFFSET, PREVIEW_CONTENT_X_OFFSET};
     use crate::apps::tui::markdown::SourcePosition;
+    use crate::apps::tui::markdown::TextKind;
     use crate::apps::tui::testutil::ansi_line_summary;
     use insta::assert_snapshot;
     use ratatui::text::Line;
@@ -1147,9 +1151,10 @@ mod tests {
             let cached: Vec<bool> = preview
                 .logical_lines
                 .iter()
-                .filter_map(|line| match &line.source {
-                    LogicalLineSource::Html(text) => Some(text.cached.borrow().is_some()),
-                    _ => None,
+                .filter_map(|line| {
+                    line.lazy_text()
+                        .filter(|_| line.text_kind() == Some(TextKind::Html))
+                        .map(|text| text.cached.borrow().is_some())
                 })
                 .collect();
             assert_eq!(cached.len(), 3, "{name}");

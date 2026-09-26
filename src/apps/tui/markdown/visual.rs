@@ -388,21 +388,7 @@ mod tests {
     }
 
     fn source_label(line: &LogicalLine) -> String {
-        match &line.source {
-            LogicalLineSource::Text(_) => "Text".to_string(),
-            LogicalLineSource::Markup(_) => "Markup".to_string(),
-            LogicalLineSource::ListItem(_) => "ListItem".to_string(),
-            LogicalLineSource::Heading { level, .. } => format!("Heading({level})"),
-            LogicalLineSource::CodeInfo { .. } => "CodeInfo".to_string(),
-            LogicalLineSource::CodeBody(_) => "CodeBody".to_string(),
-            LogicalLineSource::Output(_) => "Output".to_string(),
-            LogicalLineSource::Html(_) => "Html".to_string(),
-            LogicalLineSource::Frontmatter { .. } => "Frontmatter".to_string(),
-            LogicalLineSource::TableRow { .. } => "Table".to_string(),
-            LogicalLineSource::Image { .. } => "Image".to_string(),
-            LogicalLineSource::ThematicBreak => "ThematicBreak".to_string(),
-            LogicalLineSource::Newline => "Newline".to_string(),
-        }
+        line.source.label()
     }
 
     fn logical_line_summary(lines: &[LogicalLine]) -> String {
@@ -527,7 +513,7 @@ mod tests {
         let lines = render_nodes("> - quoted item");
         let list_item = lines
             .iter()
-            .find(|line| matches!(line.source, LogicalLineSource::ListItem(_)))
+            .find(|line| line.text_kind() == Some(TextKind::ListItem))
             .expect("expected a list item inside the blockquote");
 
         assert_eq!(list_item.prefix_width(), 4);
@@ -647,7 +633,7 @@ mod tests {
         let lines = render_nodes("<pre>\n\tindented\n</pre>\n");
         let html: Vec<&LogicalLine> = lines
             .iter()
-            .filter(|l| matches!(l.source, LogicalLineSource::Html(_)))
+            .filter(|l| l.text_kind() == Some(TextKind::Html))
             .collect();
         assert_eq!(html.len(), 3);
         assert_eq!(html[1].text_content(), "\tindented");
@@ -670,7 +656,7 @@ mod tests {
                 "block",
                 render_nodes("<div class=\"card\">\n</div>\n")
                     .iter()
-                    .find(|l| matches!(l.source, LogicalLineSource::Html(_)))
+                    .find(|l| l.text_kind() == Some(TextKind::Html))
                     .unwrap()
                     .render(&ctx),
             ),
@@ -678,7 +664,7 @@ mod tests {
                 "inline",
                 render_nodes("x <img src=\"a.png\"> y")
                     .iter()
-                    .find(|l| matches!(l.source, LogicalLineSource::Text(_)))
+                    .find(|l| l.text_kind() == Some(TextKind::Paragraph))
                     .unwrap()
                     .render(&ctx),
             ),
@@ -719,10 +705,9 @@ mod tests {
         let lines = render_nodes("- **bold item**");
         let item = lines
             .iter()
-            .find(|l| matches!(l.source, LogicalLineSource::ListItem(_)))
+            .find(|l| l.text_kind() == Some(TextKind::ListItem))
             .expect("expected a list item");
         let rendered = item.render(&ctx);
-
         assert_snapshot!("inline_list_item_styles", ansi_line(&rendered));
     }
 
